@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>MyChart — 自作トレーディングチャート</title>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root {
+    --bg:#0e1117; --panel:#161b24; --line:#232a36;
+    --text:#d1d4dc; --muted:#787b86;
+    --up:#26a69a; --down:#ef5350; --ema:#f5a623;
+    --accent:#2962ff; --star:#f5c518;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif; overscroll-behavior:none; }
+  .mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums; }
+
+  header { display:flex; align-items:center; gap:8px; padding:10px 14px;
+    background:var(--panel); border-bottom:1px solid var(--line); }
+  .sym-btn { display:flex; align-items:center; gap:6px; background:transparent;
+    border:none; color:var(--text); font-size:17px; font-weight:700; letter-spacing:.5px; cursor:pointer; }
+  .sym-btn .caret { color:var(--muted); font-size:12px; }
+  .sym-btn .fav { color:var(--star); font-size:14px; }
+  .badge { font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; letter-spacing:.5px; }
+  .badge.real   { background:rgba(38,166,154,.18); color:var(--up); }
+  .badge.sample { background:rgba(120,123,134,.18); color:var(--muted); }
+  .gear { margin-left:auto; background:transparent; border:none; color:var(--muted); font-size:18px; cursor:pointer; }
+  .tf { display:flex; gap:4px; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .tf button { background:transparent; color:var(--muted); border:none; border-radius:6px;
+    padding:6px 10px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; flex:0 0 auto; }
+  .tf button.active { background:var(--accent); color:#fff; }
+
+  .legend { display:flex; flex-wrap:wrap; gap:6px 16px; padding:8px 14px; font-size:13px;
+    border-bottom:1px solid var(--line); }
+  .legend .item { color:var(--muted); }
+  .legend .item b { color:var(--text); font-weight:600; margin-left:4px; }
+  .legend .up { color:var(--up); } .legend .down { color:var(--down); }
+
+  #chartWrap { position:relative; width:100%; height:calc(100vh - 186px); }
+  #chart { width:100%; height:100%; }
+  /* z-index（重なり順の番号）が重要：チャート部品は内部で番号を持って前に出るため、
+     こちらのレイヤーには明示的に大きい番号を付けて、必ずチャートより上に置く */
+  #overlay { position:absolute; inset:0; pointer-events:none; z-index:5; touch-action:none; }
+  #catcher { position:absolute; inset:0; display:none; background:transparent; touch-action:none; cursor:crosshair; z-index:6; }
+  .tools { display:flex; align-items:center; gap:6px; padding:8px 14px; border-bottom:1px solid var(--line); overflow-x:auto; white-space:nowrap; }
+  .tools button { background:#1c2431; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12px; font-weight:600; cursor:pointer; }
+  .tools button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .tools input[type=color] { width:30px; height:30px; padding:0; border:1px solid var(--line); border-radius:6px; background:transparent; cursor:pointer; }
+  footer { padding:8px 14px; font-size:11px; color:var(--muted); border-top:1px solid var(--line); min-height:34px; }
+  footer .err { color:var(--down); }
+
+  .backdrop { position:fixed; inset:0; background:rgba(0,0,0,.5); opacity:0; visibility:hidden; transition:opacity .2s; z-index:10; }
+  .backdrop.open { opacity:1; visibility:visible; }
+  .drawer { position:fixed; top:0; left:0; height:100%; width:82%; max-width:340px;
+    background:var(--panel); border-right:1px solid var(--line);
+    transform:translateX(-100%); transition:transform .22s ease; z-index:11; display:flex; flex-direction:column; }
+  .drawer.open { transform:translateX(0); }
+  .drawer h2 { margin:0; padding:14px; font-size:15px; border-bottom:1px solid var(--line); display:flex; align-items:center; }
+  .drawer h2 button { margin-left:auto; background:transparent; border:none; color:var(--muted); font-size:20px; cursor:pointer; line-height:1; }
+  .list { overflow-y:auto; flex:1; }
+  .row { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .row.active { background:#1c2431; }
+  .row .star { font-size:18px; color:#3a4250; width:22px; text-align:center; }
+  .row .star.on { color:var(--star); }
+  .row .tk { font-weight:700; font-size:15px; }
+  .row .nm { color:var(--muted); font-size:11px; }
+  .row .rt { margin-left:auto; text-align:right; }
+  .row .price { font-size:14px; }
+  .row .chg.up { color:var(--up); } .row .chg.down { color:var(--down); }
+  .row .chg { font-size:12px; }
+  .sec-label { padding:8px 14px; font-size:11px; color:var(--muted); background:#12161e; letter-spacing:1px; }
+  .search { display:flex; gap:6px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .search input { flex:1; min-width:0; background:#0e1117; border:1px solid var(--line); color:var(--text);
+    border-radius:6px; padding:8px 10px; font-size:14px; text-transform:uppercase; }
+  .search input::placeholder { color:var(--muted); text-transform:none; }
+  .search button { border:none; border-radius:6px; padding:0 12px; font-size:13px; font-weight:700;
+    cursor:pointer; white-space:nowrap; color:#fff; }
+  .search #showBtn { background:var(--accent); }
+  .search #addBtn { background:#2a3242; }
+  .row .del { color:#5b6472; font-size:17px; padding:0 2px 0 6px; }
+  /* 複数ウォッチリストの切り替えタブ（チップ） */
+  .listTabs { display:flex; gap:6px; padding:8px 14px 0; flex-wrap:wrap; align-items:center; }
+  .chip { background:#1c2431; color:var(--muted); border:1px solid var(--line); border-radius:14px;
+    padding:5px 12px; font-size:12px; font-weight:600; cursor:pointer; }
+  .chip.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .chip.mini { padding:5px 10px; }
+  /* アプリ内の入力画面（promptの代わり。どの環境でも確実に動く） */
+  .modalBack { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none;
+    align-items:center; justify-content:center; z-index:20; }
+  .modalBack.open { display:flex; }
+  .modal { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:16px; width:84%; max-width:320px; }
+  .modal .mtitle { font-size:14px; font-weight:700; margin-bottom:10px; white-space:pre-line; }
+  .modal input { width:100%; background:#0e1117; border:1px solid var(--line); color:var(--text);
+    border-radius:6px; padding:9px 10px; font-size:14px; }
+  .modal .mbtns { display:flex; gap:8px; margin-top:12px; }
+  .modal .mbtns button { flex:1; border:none; border-radius:6px; padding:9px 0; font-size:13px; font-weight:700; cursor:pointer; }
+  #modalCancel { background:#2a3242; color:var(--text); }
+  #modalOk { background:var(--accent); color:#fff; }
+</style>
+</head>
+<body>
+
+  <header>
+    <button class="sym-btn" id="symBtn">
+      <span class="fav" id="hdrFav" style="display:none">★</span>
+      <span id="hdrTicker">-</span>
+      <span class="caret">▾</span>
+    </button>
+    <span class="badge sample" id="badge">サンプル</span>
+    <button class="gear" id="gear" title="APIキー設定">⚙</button>
+  </header>
+
+  <div style="padding:8px 14px; border-bottom:1px solid var(--line);">
+    <div class="tf" id="tfButtons">
+      <button data-step="65m">65分</button>
+      <button data-step="1d" class="active">日足</button>
+      <button data-step="1w">週足</button>
+      <button data-step="1M">月足</button>
+      <button data-step="3M">3ヶ月</button>
+      <button data-step="6M">6ヶ月</button>
+      <button id="adlBtn" title="ADL Price Ratio" style="border-left:1px solid var(--line); border-radius:0;">ADL</button>
+    </div>
+  </div>
+
+  <div class="tools" id="toolbar">
+    <button data-tool="hline">─ 水平線</button>
+    <button data-tool="trend">／ トレンド</button>
+    <button data-tool="rect">▢ 計測ボックス</button>
+    <input type="color" id="colorPick" value="#f5c518" title="線の色" />
+    <button id="delOneBtn" style="display:none; border-color:#ef5350; color:#ef5350;">選択を削除</button>
+    <button id="clearBtn">消去</button>
+  </div>
+
+  <div class="legend mono">
+    <span class="item">O<b id="lg-o">-</b></span>
+    <span class="item">H<b id="lg-h">-</b></span>
+    <span class="item">L<b id="lg-l">-</b></span>
+    <span class="item">C<b id="lg-c">-</b></span>
+    <span class="item">前日比<b id="lg-chg">-</b></span>
+    <span class="item">出来高<b id="lg-vol">-</b></span>
+  </div>
+
+  <div id="chartWrap">
+    <div id="chart"></div>
+    <svg id="overlay"></svg>
+    <div id="catcher"></div>
+  </div>
+  <footer id="foot">EMA40・出来高2倍強調つき / ⚙からAPIキーを入れると実データになります</footer>
+
+  <div class="backdrop" id="backdrop"></div>
+  <aside class="drawer" id="drawer">
+    <h2>ウォッチリスト <button id="closeDrawer">×</button></h2>
+    <div class="search">
+      <input id="tickerInput" class="mono" type="text" placeholder="ティッカー入力 (例: AAPL)"
+             autocapitalize="characters" autocomplete="off" spellcheck="false" />
+      <button id="showBtn">表示</button>
+      <button id="addBtn">＋追加</button>
+    </div>
+    <div class="listTabs" id="listTabs"></div>
+    <div class="list" id="list"></div>
+  </aside>
+
+  <!-- アプリ内の入力画面（リスト名やAPIキーの入力に使う） -->
+  <div class="modalBack" id="modalBack">
+    <div class="modal">
+      <div class="mtitle" id="modalTitle"></div>
+      <input id="modalInput" autocomplete="off" />
+      <div class="mbtns">
+        <button id="modalCancel">キャンセル</button>
+        <button id="modalOk">OK</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* =========================================================
+   保存ヘルパー（お気に入り・APIキーを端末に記憶）
+   ・公開版では閉じても残る。プレビュー内はリロードで消える場合あり
+   ========================================================= */
+const store = {
+  get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+};
+
+/* エラーが起きたら、下のバーに表示する（今後は画面を見せてもらうだけで原因が分かる） */
+window.addEventListener('error', e=>{
+  const f=document.getElementById('foot');
+  if(f) f.innerHTML = '<span class="err">エラー: '+(e.message||'不明なエラー')+'</span>';
+});
+
+/* =========================================================
+   ① 銘柄リスト … ここに自分の小型株・バイオを足せます
+   ========================================================= */
+const SYMBOLS = [
+  { ticker:'NVDA', name:'エヌビディア', base:120 },
+  { ticker:'SOXX', name:'半導体ETF',   base:210 },
+  { ticker:'XBI',  name:'バイオETF',    base:95  },
+  { ticker:'IWM',  name:'小型株ETF',    base:220 },
+  { ticker:'ABCL', name:'AbCellera',    base:5   },
+  { ticker:'RXRX', name:'Recursion',    base:7   },
+  { ticker:'CRSP', name:'CRISPR',       base:45  },
+  { ticker:'BEAM', name:'Beam Thera',   base:25  },
+];
+
+/* 時間足の定義表
+   api  … Twelve Dataに頼む足の種類
+   size … 何本取ってくるか
+   agg  … 取った後に「束ねる」処理（65分足=5分×13本、3ヶ月足=月足×3本 など）*/
+const TF = {
+  '65m': { label:'65分',  api:'5min',   size:5000, agg:'65' },
+  '1d':  { label:'日足',  api:'1day',   size:250 },
+  '1w':  { label:'週足',  api:'1week',  size:250 },
+  '1M':  { label:'月足',  api:'1month', size:240 },
+  '3M':  { label:'3ヶ月', api:'1month', size:240, agg:3 },
+  '6M':  { label:'6ヶ月', api:'1month', size:240, agg:6 },
+};
+
+/* --- 束ねる処理の共通部品 ---
+   何本かのローソク足を1本にまとめる：始値=最初 / 高値=一番高い / 安値=一番安い / 終値=最後 / 出来高=合計 */
+function bundle(bucket, time){
+  return {
+    candle:{ time, open:+bucket[0].open,
+      high: Math.max(...bucket.map(r=>+r.high)),
+      low:  Math.min(...bucket.map(r=>+r.low)),
+      close:+bucket[bucket.length-1].close },
+    volume:{ time, value: bucket.reduce((a,r)=>a+ +(r.volume||0),0) }
+  };
+}
+
+/* 5分足 → 65分足（同じ日の中で13本ずつ束ねる。9:30開始なら1日ちょうど6本） */
+function to65(rows){
+  const candles=[], volumes=[];
+  let bucket=[], curDay='';
+  const flush=()=>{
+    if(!bucket.length) return;
+    // 時刻つきの足は「秒数（エポック秒）」で持つのがチャート部品の作法
+    const t=Math.floor(new Date(bucket[0].datetime.replace(' ','T')).getTime()/1000);
+    const b=bundle(bucket, t);
+    candles.push(b.candle); volumes.push(b.volume); bucket=[];
+  };
+  rows.forEach(r=>{
+    const day=r.datetime.slice(0,10);
+    if(day!==curDay){ flush(); curDay=day; }   // 日が変わったら区切る
+    bucket.push(r);
+    if(bucket.length===13) flush();            // 13本たまったら1本に
+  });
+  flush();
+  return {candles, volumes};
+}
+
+/* 日足 → 週足（月曜はじまりの週ごとに束ねる） */
+function toWeeks(rows){
+  const candles=[], volumes=[];
+  let bucket=[], curKey='';
+  // 「今日が世界の始まりから何週目か」を計算して、同じ週の足をまとめる
+  const keyOf=r=>{ const days=Math.floor(Date.parse(r.datetime.slice(0,10)+'T00:00:00')/86400000); return Math.floor((days+3)/7); };
+  const flush=()=>{
+    if(!bucket.length) return;
+    const b=bundle(bucket, bucket[0].datetime.slice(0,10));
+    candles.push(b.candle); volumes.push(b.volume); bucket=[];
+  };
+  rows.forEach(r=>{ const key=keyOf(r); if(key!==curKey){ flush(); curKey=key; } bucket.push(r); });
+  flush();
+  return {candles, volumes};
+}
+
+/* 月足 → 3ヶ月足/6ヶ月足（1-3月、4-6月…のように暦で区切って束ねる） */
+function toMonths(rows, k){
+  const candles=[], volumes=[];
+  let bucket=[], curKey='';
+  const keyOf=r=>{ const y=r.datetime.slice(0,4), m=+r.datetime.slice(5,7); return y+'-'+Math.floor((m-1)/k); };
+  const flush=()=>{
+    if(!bucket.length) return;
+    const b=bundle(bucket, bucket[0].datetime.slice(0,10));
+    candles.push(b.candle); volumes.push(b.volume); bucket=[];
+  };
+  rows.forEach(r=>{ const key=keyOf(r); if(key!==curKey){ flush(); curKey=key; } bucket.push(r); });
+  flush();
+  return {candles, volumes};
+}
+
+/* =========================================================
+   複数ウォッチリスト
+   lists = [{ id, name, tickers:[...] }, ...] を端末に保存
+   初回は「メイン」リストを作り、昔の追加銘柄も引き継ぐ
+   ========================================================= */
+let lists = store.get('mychart-lists', null);
+if(!lists || !lists.length){
+  const legacy = store.get('user-symbols', []); // 旧バージョンで追加した銘柄
+  lists = [{ id:1, name:'メイン', tickers:[...SYMBOLS.map(s=>s.ticker), ...legacy.map(u=>u.ticker)] }];
+  store.set('mychart-lists', lists);
+}
+let activeListId = store.get('mychart-active-list', lists[0].id);
+if(!lists.some(L=>L.id===activeListId)) activeListId = lists[0].id;
+
+function activeList(){ return lists.find(L=>L.id===activeListId) || lists[0]; }
+function saveLists(){ store.set('mychart-lists', lists); }
+// ティッカーから表示用の情報（名前など）を返す
+function symInfo(t){ return SYMBOLS.find(s=>s.ticker===t) || { ticker:t, name:'追加した銘柄' }; }
+
+/* =========================================================
+   ② 実データ取得（Twelve Data）
+   キーが無い/失敗した時は例外を投げ、呼び出し側でサンプルに切替
+   ========================================================= */
+async function fetchReal(symbol, step){
+  const key = store.get('td-key','');
+  if(!key) throw { kind:'nokey' };
+  const tf = TF[step];
+  const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}`
+            + `&interval=${tf.api}&outputsize=${tf.size}&apikey=${key}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if(json.status === 'error' || !json.values) throw { kind:'api', message: json.message || '取得失敗' };
+  // Twelve Dataは「新しい順」で返すので、古い順に並べ替える
+  const rows = json.values.slice().reverse();
+  if(tf.agg==='65') return to65(rows);              // 65分足に束ねる
+  if(tf.agg)        return toMonths(rows, tf.agg);  // 3ヶ月/6ヶ月足に束ねる
+  const candles = rows.map(v => ({ time:v.datetime.slice(0,10), open:+v.open, high:+v.high, low:+v.low, close:+v.close }));
+  const volumes = rows.map(v => ({ time:v.datetime.slice(0,10), value:+(v.volume||0) }));
+  return { candles, volumes };
+}
+
+/* =========================================================
+   ③ サンプルデータ（キーが無い時／取得失敗時のフォールバック）
+   本物と同じ考え方：まず「日足の歴史」を1本だけ作り、
+   週足・月足・3ヶ月・6ヶ月・65分足は全部そこから束ねて作る。
+   → どの時間足でも同じ値動き・同じ価格帯になる
+   ========================================================= */
+function seedFrom(s){ let h=2166136261; for(const c of s){ h^=c.charCodeAt(0); h=Math.imul(h,16777619);} return (h>>>0)%1e6+1; }
+const r2=n=>Math.round(n*100)/100;
+
+/* 銘柄ごとに「約20年ぶんの日足」を1回だけ作ってキャッシュする */
+const dailyCache={};
+function dailyRowsFor(ticker){
+  if(dailyCache[ticker]) return dailyCache[ticker];
+  const sym=SYMBOLS.find(s=>s.ticker===ticker);
+  const base=sym?sym.base:20;
+  let s=seedFrom(ticker); const rnd=()=>{ s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; };
+
+  // 平日（月〜金）の日付を過去20年ぶん集める
+  const dates=[]; const d=new Date();
+  while(dates.length<5040){                     // 252営業日 × 20年
+    const dow=d.getDay();
+    if(dow!==0 && dow!==6) dates.push(d.toISOString().slice(0,10));
+    d.setDate(d.getDate()-1);
+  }
+  dates.reverse();
+
+  // ランダムウォークで日足を作る（1日±1%程度、ゆるい上昇バイアス）
+  let price=base; const rows=[];
+  for(const date of dates){
+    const open=price;
+    const close=Math.max(0.5, open+(rnd()-0.495)*price*0.02);
+    const high=Math.max(open,close)+rnd()*price*0.01;
+    const low =Math.min(open,close)-rnd()*price*0.01;
+    rows.push({ datetime:date, open, high, low, close,
+      volume:Math.round((0.4+rnd()*1.4)*(rnd()<0.12?3:1)*1_000_000) });
+    price=close;
+  }
+  // 最後の終値がちょうど base になるよう、全体を同じ倍率で調整
+  const f=base/rows[rows.length-1].close;
+  rows.forEach(r=>{ r.open=r2(r.open*f); r.high=r2(r.high*f); r.low=r2(r.low*f); r.close=r2(r.close*f); });
+  return dailyCache[ticker]=rows;
+}
+
+/* 日足の並びを、チャートに渡す形（candles/volumes）に変える */
+function rowsToRaw(rows){
+  return {
+    candles: rows.map(r=>({ time:r.datetime.slice(0,10), open:r.open, high:r.high, low:r.low, close:r.close })),
+    volumes: rows.map(r=>({ time:r.datetime.slice(0,10), value:r.volume }))
+  };
+}
+
+/* 直近の日足から65分足を作る（1日6本、9:30開始。始値と終値は日足と一致させる） */
+function make65FromDaily(rows){
+  const candles=[], volumes=[];
+  const days=rows.slice(-45);                       // 直近45営業日ぶん
+  let s=seedFrom('65m'); const rnd=()=>{ s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; };
+  days.forEach(r=>{
+    const t0=Math.floor(Date.parse(r.datetime+'T09:30:00')/1000);
+    let p=r.open;
+    for(let i=0;i<6;i++){
+      const open=p;
+      // その日の始値→終値へ少しずつ近づけ、最後の1本はぴったり終値で締める
+      const target=r.open+(r.close-r.open)*((i+1)/6);
+      const close=(i===5)? r.close : r2(target+(rnd()-0.5)*r.open*0.004);
+      const high=r2(Math.max(open,close)+rnd()*r.open*0.003);
+      const low =r2(Math.min(open,close)-rnd()*r.open*0.003);
+      candles.push({ time:t0+i*65*60, open:r2(open), high, low, close });
+      volumes.push({ time:t0+i*65*60, value:Math.round(r.volume/6*(0.6+rnd()*0.8)) });
+      p=close;
+    }
+  });
+  return {candles, volumes};
+}
+
+/* 共通の後処理：EMA40と出来高2倍強調 */
+function ema(candles,period){ const k=2/(period+1); let p=candles[0].close;
+  return candles.map((c,i)=>{ p=i===0?c.close:c.close*k+p*(1-k); return {time:c.time,value:Math.round(p*100)/100}; }); }
+function colorVolumes(candles,volumes){ const W=15;
+  return volumes.map((v,i)=>{ const sl=volumes.slice(Math.max(0,i-W),i);
+    const avg=sl.length?sl.reduce((a,b)=>a+b.value,0)/sl.length:v.value;
+    const surge=v.value>=avg*2, up=candles[i].close>=candles[i].open;
+    return {time:v.time, value:v.value, color:surge?'#f5a623':(up?'rgba(38,166,154,0.45)':'rgba(239,83,80,0.45)')}; }); }
+function pack(raw){ return { candles:raw.candles, vols:colorVolumes(raw.candles,raw.volumes), ema:ema(raw.candles,40) }; }
+
+/* サンプルをキャッシュして返す（全部、同じ日足の歴史から束ねて作る） */
+const sampleCache={};
+function sampleDataset(ticker,step){
+  const key=ticker+'@'+step; if(sampleCache[key]) return sampleCache[key];
+  const rows=dailyRowsFor(ticker);
+  let raw;
+  if(step==='65m')      raw=make65FromDaily(rows);            // 直近の日足から65分足を合成
+  else if(step==='1d')  raw=rowsToRaw(rows.slice(-260));      // 直近1年ぶん
+  else if(step==='1w')  raw=toWeeks(rows.slice(-260*5));      // 直近5年ぶんを週で束ねる
+  else if(step==='1M')  raw=toMonths(rows,1);                 // 月で束ねる（約20年）
+  else if(step==='3M')  raw=toMonths(rows,3);                 // 四半期で束ねる
+  else                  raw=toMonths(rows,6);                 // 半年で束ねる
+  return sampleCache[key]=pack(raw);
+}
+
+/* 実データのキャッシュ（APIの回数を節約） */
+const realCache={};
+
+/* =========================================================
+   ④ チャート本体（部品が読み込めてから動かす）
+   ========================================================= */
+// 読み込み失敗時に、白画面ではなく理由を表示する
+function showLoadError(){
+  document.getElementById('chart').innerHTML =
+    '<div style="padding:24px;color:#d1d4dc;font-size:14px;line-height:1.9">'
+    + 'チャート部品を読み込めませんでした。<br>'
+    + 'このプレビュー画面が外部ファイルの読み込みをブロックしている可能性があります。<br><br>'
+    + '▶ Safariで直接開くか、GitHub Pagesに公開してから開くと表示されます。'
+    + '</div>';
+  document.getElementById('foot').textContent = '部品の読み込みに失敗（プレビュー制限の可能性）';
+}
+// 部品が用意できるまで最大3秒待ってから main() を実行
+function whenReady(cb, tries){
+  tries = (tries==null) ? 60 : tries;
+  if(window.LightweightCharts && window.LightweightCharts.CandlestickSeries) cb();
+  else if(tries<=0) showLoadError();
+  else setTimeout(function(){ whenReady(cb, tries-1); }, 50);
+}
+
+function main(){
+const chart=LightweightCharts.createChart(document.getElementById('chart'),{
+  layout:{background:{color:'#0e1117'},textColor:'#d1d4dc'},
+  grid:{vertLines:{color:'#1b212c'},horzLines:{color:'#1b212c'}},
+  crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+  rightPriceScale:{borderColor:'#232a36'}, timeScale:{borderColor:'#232a36'},
+});
+const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
+  upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
+candleSeries.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.28}});
+const emaSeries=chart.addSeries(LightweightCharts.LineSeries,{color:'#f5a623',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
+const volumeSeries=chart.addSeries(LightweightCharts.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:''});
+volumeSeries.priceScale().applyOptions({scaleMargins:{top:0.78,bottom:0}});
+
+/* =========================================================
+   ⑤ 状態＆描画（実データ→ダメならサンプル）
+   ========================================================= */
+let current={ ticker:store.get('mychart-last', SYMBOLS[0].ticker), step:'1d' };
+let favs=store.get('mychart-favs', []);
+let lastCandle, lastVol, currentCandles=[], currentVols=[];
+// 描画ツールの状態
+let tool=null, drawColor='#f5c518', drawings=[], drag=null, uid=1, selected=null;
+// 銘柄ごとの描画の保存場所（例: "NVDA" → その銘柄の線一覧。全時間足で共有）
+let drawingsMap=store.get('mychart-drawings', {});
+// 旧バージョンの保存（時間足ごと・日付文字列）を、新形式（銘柄ごと・秒数）に引き継ぐ
+(function(){
+  let changed=false; const out={};
+  Object.keys(drawingsMap).forEach(k=>{
+    const tick = k.includes('@') ? k.slice(0, k.indexOf('@')) : k;   // "NVDA@1d" → "NVDA"
+    if(k.includes('@')) changed=true;
+    const arr = drawingsMap[k]||[];
+    arr.forEach(d=>{ ['a','b'].forEach(pt=>{
+      if(d[pt] && typeof d[pt].t==='string'){ d[pt].t=Math.floor(Date.parse(d[pt].t+'T00:00:00')/1000); changed=true; }
+    }); });
+    out[tick]=(out[tick]||[]).concat(arr);
+  });
+  if(changed){ drawingsMap=out; store.set('mychart-drawings', drawingsMap); }
+})();
+const $=id=>document.getElementById(id);
+const isFav=t=>favs.includes(t);
+
+function draw(d){
+  candleSeries.setData(d.candles); emaSeries.setData(d.ema); volumeSeries.setData(d.vols);
+  currentCandles=d.candles;
+  currentVols=d.vols;                          // ADL計算に使う出来高
+  epochs=d.candles.map(c=>toEpoch(c.time));   // 各バーの時刻(秒数)一覧を作る
+  loadDrawings();               // この銘柄に保存してある線を読み込む（全時間足共通）
+  updateADL();                  // ADL指標を計算し直す
+  // 65分足のときだけ、横軸に時刻も表示する
+  chart.applyOptions({ timeScale:{ timeVisible: current.step==='65m', secondsVisible:false } });
+  chart.timeScale().fitContent();
+  lastCandle=d.candles[d.candles.length-1]; lastVol=d.vols[d.vols.length-1];
+  updateLegend(lastCandle,lastVol);
+  redrawOverlay();
+}
+function setMode(mode, msg){
+  const b=$('badge');
+  if(mode==='real'){ b.textContent='リアル'; b.className='badge real'; $('foot').textContent='Twelve Dataの実データを表示中'; }
+  else { b.textContent='サンプル'; b.className='badge sample';
+    $('foot').innerHTML = msg ? `<span class="err">${msg}</span>` : 'サンプル表示中。⚙からAPIキーを入れると実データになります'; }
+}
+
+async function render(){
+  const cacheKey=current.ticker+'@'+current.step;
+  $('hdrTicker').textContent=current.ticker;
+  $('hdrFav').style.display=isFav(current.ticker)?'inline':'none';
+  store.set('mychart-last', current.ticker);
+
+  if(realCache[cacheKey]){ draw(realCache[cacheKey]); setMode('real'); return; }
+
+  if(store.get('td-key','')){
+    $('foot').textContent='読み込み中…';
+    try{
+      const d=pack(await fetchReal(current.ticker,current.step));
+      realCache[cacheKey]=d; draw(d); setMode('real'); renderList();
+    }catch(err){
+      draw(sampleDataset(current.ticker,current.step));
+      if(err.kind==='api') setMode('sample','APIエラー: '+err.message+'（サンプル表示）');
+      else setMode('sample','取得できず（通信/CORS）→ サンプル表示');
+    }
+  } else {
+    draw(sampleDataset(current.ticker,current.step)); setMode('sample');
+  }
+}
+
+function fmtVol(n){ return n>=1_000_000 ? (n/1_000_000).toFixed(2)+'M' : (n/1000).toFixed(0)+'K'; }
+function updateLegend(c,v){
+  if(!c) return;
+  $('lg-o').textContent=c.open.toFixed(2); $('lg-h').textContent=c.high.toFixed(2);
+  $('lg-l').textContent=c.low.toFixed(2);  $('lg-c').textContent=c.close.toFixed(2);
+  $('lg-vol').textContent=v?fmtVol(v.value):'-';
+  const chg=(c.close-c.open)/c.open*100, el=$('lg-chg');
+  el.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%'; el.className=chg>=0?'up':'down';
+}
+chart.subscribeCrosshairMove(p=>{
+  if(!p.time){ updateLegend(lastCandle,lastVol); return; }
+  updateLegend(p.seriesData.get(candleSeries), p.seriesData.get(volumeSeries));
+});
+
+/* =========================================================
+   ADL Price Ratio（TradingViewの自作Pine指標をそのまま移植）
+   青 = Price Percent : 終値が「直近200本の高値〜安値」のどの位置か(0〜1)
+   赤 = A/D Percent   : A/D累積線に同じ計算をしたもの
+   ▼▲ = 青と赤のデッドクロス/ゴールデンクロスを価格チャートに表示
+   ========================================================= */
+const ADL_LEN = 200;   // Pine側の len=200 と同じ
+
+function computeADL(candles, volumes){
+  const n=candles.length, ch=new Array(n); let cum=0;
+  // ① A/Dの累積線を作る（Pineの sourcead → ta.cum と同じ式）
+  for(let i=0;i<n;i++){
+    const c=candles[i], prevC = i>0 ? candles[i-1].close : null;
+    let mfv=0;
+    if(prevC!=null){
+      const hi=Math.max(c.high, prevC), lo=Math.min(c.low, prevC), den=hi-lo;
+      const vol=volumes[i] ? volumes[i].value : 0;
+      mfv = den>0 ? (((c.close-lo)-(hi-c.close))/den)*vol : 0;   // Pineのnz()と同じ扱い
+    }
+    cum+=mfv; ch[i]=cum;
+  }
+  // ② 青と赤を、直近200本の範囲で0〜1に正規化（ta.highest/ta.lowestと同じ）
+  const blue=[], red=[];
+  for(let i=0;i<n;i++){
+    const s=Math.max(0, i-ADL_LEN+1);
+    let hiC=-Infinity, loC=Infinity, hiA=-Infinity, loA=Infinity;
+    for(let j=s;j<=i;j++){
+      const cc=candles[j].close; if(cc>hiC)hiC=cc; if(cc<loC)loC=cc;
+      const aa=ch[j];            if(aa>hiA)hiA=aa; if(aa<loA)loA=aa;
+    }
+    blue.push({ time:candles[i].time, value:+(hiC>loC ? (candles[i].close-loC)/(hiC-loC) : 0.5).toFixed(4) });
+    red .push({ time:candles[i].time, value:+(hiA>loA ? (ch[i]-loA)/(hiA-loA) : 0.5).toFixed(4) });
+  }
+  return {blue, red};
+}
+
+/* 青と赤のクロス地点を探す（▼=デッドクロス ▲=ゴールデンクロス） */
+function adlCrossMarkers(blue, red){
+  const marks=[];
+  for(let i=1;i<blue.length;i++){
+    const d0=blue[i-1].value-red[i-1].value, d1=blue[i].value-red[i].value;
+    if(d0>=0 && d1<0)      marks.push({ time:blue[i].time, position:'aboveBar', color:'#ef5350', shape:'arrowDown', text:'DC' });
+    else if(d0<=0 && d1>0) marks.push({ time:blue[i].time, position:'belowBar', color:'#26a69a', shape:'arrowUp',   text:'GC' });
+  }
+  return marks;
+}
+
+/* ADLのON/OFF（下の枠と矢印を作る/消す。設定は端末に記憶） */
+let adlOn=store.get('adl-on', false);
+let adlBlueSeries=null, adlRedSeries=null, adlMarkers=null;
+
+function setADL(on){
+  adlOn=on; store.set('adl-on', on);
+  $('adlBtn').classList.toggle('active', on);
+  if(on && !adlBlueSeries){
+    // チャートの下に2段目の枠(ペイン)を作って、青と赤の線を置く
+    adlBlueSeries=chart.addSeries(LightweightCharts.LineSeries,
+      { color:'#2962ff', lineWidth:2, priceLineVisible:false, lastValueVisible:false }, 1);
+    adlRedSeries =chart.addSeries(LightweightCharts.LineSeries,
+      { color:'#ef5350', lineWidth:2, priceLineVisible:false, lastValueVisible:false }, 1);
+    if(!adlMarkers) adlMarkers=LightweightCharts.createSeriesMarkers(candleSeries, []);
+    try{ chart.panes()[1].setHeight(130); }catch(e){}
+  }
+  if(!on && adlBlueSeries){
+    chart.removeSeries(adlBlueSeries); chart.removeSeries(adlRedSeries);
+    adlBlueSeries=null; adlRedSeries=null;
+    if(adlMarkers) adlMarkers.setMarkers([]);
+  }
+  updateADL();
+  setFoot(on ? 'ADL Price Ratio 表示中（青=Price / 赤=A/D、▼▲=クロス）' : 'ADLを非表示にしました');
+}
+
+/* いま表示中のデータで指標を計算し直す（銘柄・時間足を変えるたびに呼ばれる） */
+function updateADL(){
+  if(!adlOn || !adlBlueSeries || !currentCandles.length) return;
+  const {blue, red}=computeADL(currentCandles, currentVols);
+  adlBlueSeries.setData(blue);
+  adlRedSeries.setData(red);
+  adlMarkers.setMarkers(adlCrossMarkers(blue, red));
+}
+
+/* =========================================================
+   ⑦ 描画ツール（透明レイヤーで描くので後から動かせる）
+   ・水平線：上下ドラッグで移動
+   ・トレンド：両端の丸で長さ/角度を変更、線の真ん中で全体移動
+   ・計測ボックス：四角で囲むと変化率%・値幅・本数を表示、角でリサイズ
+   ========================================================= */
+function setFoot(msg){ $('foot').textContent = msg; }
+
+const svg = $('overlay');
+const TS = ()=>chart.timeScale();
+// 「何本目か(logical)」「価格」⇔ 画面ピクセル の変換
+function Lx(l){ return TS().logicalToCoordinate(l); }
+function Py(p){ return candleSeries.priceToCoordinate(p); }
+function xToL(x){ return TS().coordinateToLogical(x); }
+function yToP(y){ return candleSeries.coordinateToPrice(y); }
+
+/* --- 線を「世界共通の時刻（エポック秒）」で覚えるための変換 ---
+   日足の日付でも65分足の時刻でも、全部「秒数」に直して覚える。
+   こうすると、どの時間足に切り替えても同じ値段・同じ時間の場所に線が出る */
+let epochs=[];   // いま表示中の各ローソク足の時刻（秒数）一覧
+function toEpoch(t){ return typeof t==='number' ? t : Math.floor(Date.parse(t+'T00:00:00')/1000); }
+
+// 時刻(秒) → 「何本目か」（小数もあり。データの外側でも延長線上で計算する）
+function tsToLogical(ts){
+  const e=epochs, n=e.length-1; if(n<1) return null;
+  if(ts<=e[0]) return (ts-e[0])/(e[1]-e[0]);
+  if(ts>=e[n]) return n+(ts-e[n])/(e[n]-e[n-1]);
+  let lo=0, hi=n;
+  while(hi-lo>1){ const mid=(lo+hi)>>1; if(e[mid]<=ts) lo=mid; else hi=mid; }
+  return lo+(ts-e[lo])/(e[hi]-e[lo]);
+}
+// 「何本目か」→ 時刻(秒)（上の逆変換）
+function logicalToTs(l){
+  const e=epochs, n=e.length-1; if(n<1) return null;
+  if(l<=0) return e[0]+l*(e[1]-e[0]);
+  if(l>=n) return e[n]+(l-n)*(e[n]-e[n-1]);
+  const i=Math.floor(l); return e[i]+(l-i)*(e[i+1]-e[i]);
+}
+// 画面の横位置 ⇔ 時刻(秒)
+function xToTs(x){ const l=xToL(x); if(l==null) return null; const ts=logicalToTs(l); return ts==null?null:Math.round(ts); }
+function tsToX(ts){ const l=tsToLogical(ts); return l==null?null:Lx(l); }
+
+/* --- 銘柄ごとの保存・読み込み（全時間足で共有） --- */
+function dKey(){ return current.ticker; }
+function saveDrawings(){ drawingsMap[dKey()]=drawings; store.set('mychart-drawings', drawingsMap); }
+function loadDrawings(){
+  drawings = drawingsMap[dKey()] || [];
+  drawings.forEach(d=>{ if(!d.id) d.id=uid++; uid=Math.max(uid, d.id+1); });
+  selected=null; hideDelBtn();
+}
+function showDelBtn(){ $('delOneBtn').style.display='inline-block'; }
+function hideDelBtn(){ $('delOneBtn').style.display='none'; }
+// 指/マウスの位置を、チャート左上からのピクセルに直す
+function pos(e){ const r=svg.getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; }
+// SVG部品を作る小道具
+function el(tag, a){ const n=document.createElementNS('http://www.w3.org/2000/svg',tag); for(const k in a) n.setAttribute(k,a[k]); return n; }
+
+/* =========================================================
+   図形の描画は「作る(build)」と「動かす(layout)」を分ける
+   重要：ドラッグ中に部品を作り直すと、指が触れている部品ごと
+   消えてしまい、iPhoneが「触っていた物が消えた」と判断して
+   ドラッグを打ち切り、残りの指の動きがスクロールになってしまう。
+   → 作り直すのは図形が増減した時だけ。ドラッグ中は位置だけ動かす
+   ========================================================= */
+let elMap={};   // 図形ID → その図形の画面部品セット
+
+function syncSize(){
+  const w=$('chart').clientWidth, h=$('chart').clientHeight;
+  svg.setAttribute('width',w); svg.setAttribute('height',h);
+}
+function setPos(node, attrs){ for(const k in attrs) node.setAttribute(k, attrs[k]); }
+function showParts(parts, on){ for(const k in parts) parts[k].setAttribute('visibility', on?'visible':'hidden'); }
+
+// 図形1つぶんの部品を作る（位置は layoutOne が決める）
+function buildOne(d){
+  const parts={};
+  if(d.type==='hline'){
+    // 掴むための透明な帯 → 見える線 → 価格ラベル
+    parts.hit=el('line',{stroke:'transparent','stroke-width':28,'data-id':d.id,'data-role':'move',style:'pointer-events:all;cursor:ns-resize;touch-action:none'});
+    parts.vis=el('line',{stroke:d.color,style:'pointer-events:none'});
+    parts.txt=el('text',{x:6,fill:d.color,'font-size':11,style:'pointer-events:none'});
+    svg.appendChild(parts.hit); svg.appendChild(parts.vis); svg.appendChild(parts.txt);
+  } else if(d.type==='rect'){
+    parts.body=el('rect',{fill:d.color,'fill-opacity':0.12,stroke:d.color,'data-id':d.id,'data-role':'body',style:'pointer-events:all;cursor:move;touch-action:none'});
+    parts.txt=el('text',{fill:d.color,'font-size':11,'font-weight':'700',style:'pointer-events:none'});
+    svg.appendChild(parts.body); svg.appendChild(parts.txt);
+    addHandles(parts, d);
+  } else { // trend
+    parts.hit=el('line',{stroke:'transparent','stroke-width':28,'data-id':d.id,'data-role':'body',style:'pointer-events:all;cursor:move;touch-action:none'});
+    parts.vis=el('line',{stroke:d.color,style:'pointer-events:none'});
+    svg.appendChild(parts.hit); svg.appendChild(parts.vis);
+    addHandles(parts, d);
+  }
+  elMap[d.id]=parts;
+  layoutOne(d);
+}
+// 端点の丸ハンドル（見えない大きめの円=当たり判定 と 見た目の丸）
+function addHandles(parts, d){
+  parts.hitA=el('circle',{r:16,fill:'transparent','data-id':d.id,'data-role':'a',style:'pointer-events:all;cursor:pointer;touch-action:none'});
+  parts.visA=el('circle',{r:8,fill:'#0e1117',stroke:d.color,'stroke-width':2,style:'pointer-events:none'});
+  parts.hitB=el('circle',{r:16,fill:'transparent','data-id':d.id,'data-role':'b',style:'pointer-events:all;cursor:pointer;touch-action:none'});
+  parts.visB=el('circle',{r:8,fill:'#0e1117',stroke:d.color,'stroke-width':2,style:'pointer-events:none'});
+  svg.appendChild(parts.hitA); svg.appendChild(parts.visA);
+  svg.appendChild(parts.hitB); svg.appendChild(parts.visB);
+}
+
+// 図形1つぶんの位置・見た目を最新にする（部品は消さない）
+function layoutOne(d){
+  const parts=elMap[d.id]; if(!parts) return;
+  const sel=(d.id===selected);               // 選択中は太く
+  if(d.type==='hline'){
+    const y=Py(d.price);
+    if(y==null){ showParts(parts,false); return; }
+    showParts(parts,true);
+    const W=svg.getAttribute('width');
+    setPos(parts.hit,{x1:0,y1:y,x2:W,y2:y});
+    setPos(parts.vis,{x1:0,y1:y,x2:W,y2:y,'stroke-width':sel?3:1.5});
+    setPos(parts.txt,{y:y-4}); parts.txt.textContent=d.price.toFixed(2);
+    return;
+  }
+  const x1=tsToX(d.a.t), y1=Py(d.a.p), x2=tsToX(d.b.t), y2=Py(d.b.p);
+  if(x1==null||y1==null||x2==null||y2==null){ showParts(parts,false); return; }
+  showParts(parts,true);
+  if(d.type==='rect'){
+    const x=Math.min(x1,x2), y=Math.min(y1,y2), w=Math.abs(x2-x1), h=Math.abs(y2-y1);
+    setPos(parts.body,{x,y,width:w,height:h,'stroke-width':sel?3:1.5});
+    setPos(parts.txt,{x:x+6,y:y+14});
+    parts.txt.textContent=statsText(d.a, d.b);   // +3.2% / 値幅 / 本数
+  } else {
+    setPos(parts.hit,{x1,y1,x2,y2});
+    setPos(parts.vis,{x1,y1,x2,y2,'stroke-width':sel?3.5:2});
+  }
+  setPos(parts.hitA,{cx:x1,cy:y1}); setPos(parts.visA,{cx:x1,cy:y1});
+  setPos(parts.hitB,{cx:x2,cy:y2}); setPos(parts.visB,{cx:x2,cy:y2});
+}
+
+// 1点目の目印の位置を最新にする
+function layoutPending(){
+  const parts=elMap['pp']; if(!parts) return;
+  const x=pendingPoint?tsToX(pendingPoint.t):null, y=pendingPoint?Py(pendingPoint.p):null;
+  if(x==null||y==null){ showParts(parts,false); return; }
+  showParts(parts,true);
+  setPos(parts.dot,{cx:x,cy:y}); setPos(parts.ring,{cx:x,cy:y});
+}
+
+// 全部ゼロから作り直す（図形が増減した時だけ。ドラッグ中は呼ばない）
+function redrawOverlay(){
+  if(!svg) return;
+  syncSize();
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+  elMap={};
+  drawings.forEach(buildOne);
+  if(creating) buildOne(creating);             // 引っぱっている最中のプレビュー
+  if(pendingPoint){                            // タップ2回方式の「1点目」の目印
+    const parts={};
+    parts.dot=el('circle',{r:5,fill:drawColor,style:'pointer-events:none'});
+    parts.ring=el('circle',{r:10,fill:'none',stroke:drawColor,'stroke-width':1.5,style:'pointer-events:none'});
+    svg.appendChild(parts.dot); svg.appendChild(parts.ring);
+    elMap['pp']=parts;
+    layoutPending();
+  }
+}
+// 位置だけ最新にする（ドラッグ中・チャートを動かした時はこちら）
+function layoutOverlay(){
+  if(!svg) return;
+  syncSize();
+  drawings.forEach(layoutOne);
+  if(creating) layoutOne(creating);
+  layoutPending();
+}
+
+/* ---------------------------------------------------------
+   新規作成：押したまま引っぱると、線がついてくる（離した所で確定）
+   すぐ離した場合は「タップ2回」方式として1点目を覚えておく
+   --------------------------------------------------------- */
+let pendingPoint=null;                                   // タップ2回方式の1点目
+let creating=null, createStart=null, createMoved=false;  // 引っぱり中のプレビュー
+
+// 計測の途中経過（+3.2% / 値幅 / 本数）を作る
+function statsText(a,b){
+  const pct=(b.p-a.p)/a.p*100, diff=b.p-a.p, bars=Math.round(Math.abs(tsToLogical(b.t)-tsToLogical(a.t)));
+  return (pct>=0?'+':'')+pct.toFixed(2)+'% / '+(diff>=0?'+':'')+diff.toFixed(2)+' / '+bars+'本';
+}
+// 画面上の位置（クライアント座標）→ チャート左上からのピクセル
+function chartXY(e){ const r=$('chart').getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; }
+
+$('catcher').addEventListener('pointerdown', e=>{
+  if(!tool) return;
+  e.preventDefault(); // チャート側に触れさせない
+  const {x,y}=chartXY(e);
+  const price=yToP(y), t=xToTs(x);
+  if(price==null||t==null){ setFoot('チャートの内側をタップしてください'); return; }
+
+  if(tool==='hline'){
+    // 押している間は上下に微調整でき、離した場所に置かれる
+    creating={ id:0, type:'hline', color:drawColor, price };
+    createStart={x,y}; createMoved=false;
+    setFoot('価格 '+price.toFixed(2)+'（離すと確定）');
+    redrawOverlay(); return;
+  }
+  if(pendingPoint){
+    // 2点目：1点目とつないでプレビュー（動かして微調整→離して確定）
+    creating={ id:0, type:tool, color:drawColor, a:pendingPoint, b:{t,p:price} };
+    pendingPoint=null; createStart={x,y}; createMoved=true;
+    setFoot(statsText(creating.a, creating.b));
+    redrawOverlay(); return;
+  }
+  // 1点目：押したまま引っぱればそのまま描ける。すぐ離せばタップ2回方式
+  creating={ id:0, type:tool, color:drawColor, a:{t,p:price}, b:{t,p:price} };
+  createStart={x,y}; createMoved=false;
+  redrawOverlay();
+});
+
+// 引っぱっている間：プレビューを更新し、下のバーに数値をリアルタイム表示
+window.addEventListener('pointermove', e=>{
+  if(!creating) return;
+  const {x,y}=chartXY(e);
+  if(createStart && Math.hypot(x-createStart.x, y-createStart.y)>10) createMoved=true;
+  if(creating.type==='hline'){
+    const pr=yToP(y); if(pr!=null){ creating.price=pr; setFoot('価格 '+pr.toFixed(2)+'（離すと確定）'); }
+  } else {
+    const t=xToTs(x), pr=yToP(y);
+    if(t!=null&&pr!=null){ creating.b={t,p:pr}; setFoot(statsText(creating.a, creating.b)); }
+  }
+  layoutOverlay();   // 位置だけ更新（作り直さない）
+});
+
+// 離した瞬間：確定（ほぼ動かしていなければ「タップ2回」の1点目として待つ）
+window.addEventListener('pointerup', ()=>{
+  if(!creating) return;
+  const c=creating; creating=null; createStart=null;
+  if(c.type==='hline'){
+    c.id=uid++; drawings.push(c); saveDrawings();
+    setFoot('水平線を追加（掴んで上下に動かせます）');
+    setTool(null); redrawOverlay(); return;
+  }
+  if(!createMoved){
+    pendingPoint=c.a;   // 1点目として記憶（目印の丸が出る）
+    setFoot('もう1点タップ（引っぱってもOK）');
+    redrawOverlay(); return;
+  }
+  if(c.a.t===c.b.t){ setFoot('もう少し横まで引っぱってください'); redrawOverlay(); return; }
+  c.id=uid++; drawings.push(c); saveDrawings();
+  setFoot((c.type==='rect'?'計測ボックス':'トレンドライン')+'を追加（掴んで動かせます）');
+  setTool(null); redrawOverlay();
+});
+
+// ---- 既存の線/枠を「掴んで動かす」操作（こちらは対象が小さいので従来通り） ----
+// Safariの一部バージョンはSVG要素の setPointerCapture が不安定なため、
+// 失敗しても止まらないように try/catch で囲む
+function tryCapture(e){ try{ svg.setPointerCapture(e.pointerId); }catch(err){ /* 失敗しても続行 */ } }
+
+svg.addEventListener('pointerdown', e=>{
+  const t=e.target, id=t.getAttribute&&t.getAttribute('data-id'), role=t.getAttribute&&t.getAttribute('data-role');
+  if(!id) return; // 既存の図形の上以外は、チャート自身の操作(パン等)に譲る
+  const d=drawings.find(x=>x.id===+id); if(!d) return;
+  selected=d.id; showDelBtn(); layoutOverlay();   // 選択中の太さに更新（※作り直さない！指の下の部品を消さないため）
+  drag={ d, role, start:pos(e), orig:JSON.parse(JSON.stringify(d)),
+         la: d.a?tsToLogical(d.a.t):null, lb: d.b?tsToLogical(d.b.t):null }; // 全体移動用に、今の位置（何本目か・小数）を控えておく
+  tryCapture(e); e.preventDefault();
+});
+// 線に指が触れた瞬間に「これはスクロールではない」とiPhoneに宣言する。
+// これが無いと、上下ドラッグ(特に水平線)をiPhoneがスクロールと誤解して
+// ドラッグを途中で強制キャンセルし、画面ごと動いてしまう
+svg.addEventListener('touchstart', e=>{
+  const t=e.target;
+  if(t && t.getAttribute && t.getAttribute('data-id')) e.preventDefault();
+}, {passive:false});
+// move/upは svg ではなく window で監視する
+// → setPointerCapture が失敗しても、指がどこに動いてもドラッグを追跡できる
+window.addEventListener('pointermove', e=>{
+  if(!drag) return;
+  const p=pos(e);
+  const d=drag.d, o=drag.orig;
+  if(d.type==='hline'){ const pr=yToP(p.y); if(pr!=null) d.price=pr; }
+  else if(drag.role==='a'){ const t=xToTs(p.x), pr=yToP(p.y); if(t!=null&&pr!=null) d.a={t, p:pr}; }
+  else if(drag.role==='b'){ const t=xToTs(p.x), pr=yToP(p.y); if(t!=null&&pr!=null) d.b={t, p:pr}; }
+  else { // body：全体を平行移動（小数単位でなめらかに動く）
+    const l1=xToL(drag.start.x), l2=xToL(p.x);
+    const dp=yToP(p.y)-yToP(drag.start.y);
+    if(l1==null||l2==null||isNaN(dp)||drag.la==null||drag.lb==null) return;
+    const dl=l2-l1;   // 何本ぶん動いたか（小数のまま）
+    const ta=logicalToTs(drag.la+dl), tb=logicalToTs(drag.lb+dl);
+    if(ta==null||tb==null) return;
+    d.a={t:Math.round(ta), p:o.a.p+dp};
+    d.b={t:Math.round(tb), p:o.b.p+dp};
+  }
+  layoutOverlay();   // 位置だけ更新（作り直さない）
+});
+function endPointer(){ if(drag) saveDrawings(); drag=null; }  // 動かし終わったら保存
+window.addEventListener('pointerup', endPointer);
+window.addEventListener('pointercancel', endPointer);
+// iPhoneで、線を動かしている最中に「画面スクロール」が割り込んで
+// ドラッグが途切れるのを防ぐ（これが引っ掛かりの主原因）
+window.addEventListener('touchmove', e=>{ if(drag||creating) e.preventDefault(); }, {passive:false});
+
+// ツール選択 / 色 / 消去
+function setTool(t){
+  tool=t; pendingPoint=null; creating=null; createStart=null;
+  document.querySelectorAll('#toolbar button[data-tool]').forEach(x=>x.classList.toggle('active', x.dataset.tool===t));
+  $('catcher').style.display = t ? 'block' : 'none';   // ツール中だけ受け皿を出す
+  if(t) setFoot(t==='hline'?'水平線：置きたい所を押す（押したまま上下で微調整）':'引っぱって描く（タップ2回でもOK）');
+  else setFoot('ツールを解除しました');
+}
+function clearDrawings(){ drawings=[]; drag=null; pendingPoint=null; creating=null; createStart=null; selected=null; hideDelBtn(); saveDrawings(); redrawOverlay(); }
+
+$('toolbar').addEventListener('click', e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  if(b.id==='clearBtn'){ clearDrawings(); setFoot('この銘柄の描画を消去しました'); return; }
+  if(b.id==='delOneBtn'){                            // 選択中の1本だけ削除
+    drawings=drawings.filter(x=>x.id!==selected);
+    selected=null; hideDelBtn(); saveDrawings(); redrawOverlay();
+    setFoot('選択した描画を削除しました'); return;
+  }
+  if(b.dataset.tool) setTool(tool===b.dataset.tool ? null : b.dataset.tool);
+});
+$('colorPick').addEventListener('input', e=>{ drawColor=e.target.value; });
+
+// パン・ズームしたら重ねレイヤーも追従させる
+TS().subscribeVisibleLogicalRangeChange(layoutOverlay);   // パン/ズーム中は位置更新のみ
+
+/* =========================================================
+   アプリ内の入力画面（promptの代わり）
+   ブラウザ内蔵のprompt/confirmは、ホーム画面に追加したアプリ等では
+   まったく動かないことがあるため、自前の画面を使う
+   ========================================================= */
+let modalCb=null;
+function askText(title, initial, cb){
+  $('modalTitle').textContent=title;
+  $('modalInput').value=initial||'';
+  modalCb=cb;
+  $('modalBack').classList.add('open');
+  setTimeout(()=>$('modalInput').focus(), 50);
+}
+$('modalOk').addEventListener('click',()=>{
+  const v=$('modalInput').value;
+  $('modalBack').classList.remove('open');
+  const cb=modalCb; modalCb=null;
+  if(cb) cb(v);
+});
+$('modalCancel').addEventListener('click',()=>{ $('modalBack').classList.remove('open'); modalCb=null; });
+
+/* =========================================================
+   ⑥ ウォッチリスト（複数リスト対応）
+   ========================================================= */
+function priceOf(ticker){
+  // 実データがあればそれ、無ければサンプルの日足から最新値と前日比
+  const d = realCache[ticker+'@1d'] || sampleDataset(ticker,'1d');
+  const c=d.candles, last=c[c.length-1], prev=c[c.length-2];
+  return { price:last.close, chg:(last.close-prev.close)/prev.close*100 };
+}
+
+/* リスト切り替えタブ（＋新規 / ✎名前変更 / 🗑削除） */
+function renderTabs(){
+  const tabs=$('listTabs'); tabs.innerHTML='';
+  lists.forEach(L=>{
+    const c=document.createElement('button');
+    c.className='chip'+(L.id===activeListId?' active':'');
+    c.textContent=L.name;
+    c.addEventListener('click',()=>{
+      activeListId=L.id; store.set('mychart-active-list',activeListId);
+      renderTabs(); renderList();
+    });
+    tabs.appendChild(c);
+  });
+  // ＋ 新しいリストを作る
+  const add=document.createElement('button'); add.className='chip mini'; add.textContent='＋';
+  add.addEventListener('click',()=>{
+    askText('新しいリストの名前（例: バイオ、半導体）','',name=>{
+      if(!name||!name.trim()) return;
+      const L={ id:Date.now(), name:name.trim(), tickers:[] };
+      lists.push(L); activeListId=L.id;
+      saveLists(); store.set('mychart-active-list',activeListId);
+      renderTabs(); renderList();
+    });
+  });
+  tabs.appendChild(add);
+  // ✎ いま開いているリストの名前を変える
+  const ren=document.createElement('button'); ren.className='chip mini'; ren.textContent='✎';
+  ren.addEventListener('click',()=>{
+    const L=activeList();
+    askText('リスト名を変更', L.name, name=>{
+      if(!name||!name.trim()) return;
+      L.name=name.trim(); saveLists(); renderTabs();
+    });
+  });
+  tabs.appendChild(ren);
+  // 🗑 いま開いているリストを削除（1回目のタップで確認、もう一度タップで実行）
+  if(lists.length>1){
+    const del=document.createElement('button'); del.className='chip mini'; del.textContent='🗑';
+    let armed=false;
+    del.addEventListener('click',()=>{
+      if(!armed){
+        armed=true; del.textContent='削除する？'; del.style.color='#ef5350';
+        setTimeout(()=>{ armed=false; if(del.isConnected){ del.textContent='🗑'; del.style.color=''; } }, 3000);
+        return;
+      }
+      const L=activeList();
+      lists=lists.filter(x=>x.id!==L.id); activeListId=lists[0].id;
+      saveLists(); store.set('mychart-active-list',activeListId);
+      renderTabs(); renderList();
+    });
+    tabs.appendChild(del);
+  }
+}
+
+function renderList(){
+  const list=$('list'); list.innerHTML='';
+  const tickers=activeList().tickers;
+  if(!tickers.length){ list.appendChild(label('「＋追加」で銘柄を入れてください')); return; }
+  const fav=tickers.filter(t=>isFav(t)), oth=tickers.filter(t=>!isFav(t));
+  if(fav.length) list.appendChild(label('★ お気に入り'));
+  fav.forEach(t=>list.appendChild(rowEl(symInfo(t))));
+  if(fav.length) list.appendChild(label('リストの銘柄'));
+  oth.forEach(t=>list.appendChild(rowEl(symInfo(t))));
+}
+function label(t){ const d=document.createElement('div'); d.className='sec-label'; d.textContent=t; return d; }
+function rowEl(s){
+  const {price,chg}=priceOf(s.ticker);
+  const row=document.createElement('div'); row.className='row'+(s.ticker===current.ticker?' active':'');
+  row.innerHTML=`
+    <div class="star ${isFav(s.ticker)?'on':''}" data-star="${s.ticker}">${isFav(s.ticker)?'★':'☆'}</div>
+    <div><div class="tk">${s.ticker}</div><div class="nm">${s.name}</div></div>
+    <div class="rt mono"><div class="price">${price.toFixed(2)}</div>
+      <div class="chg ${chg>=0?'up':'down'}">${chg>=0?'+':''}${chg.toFixed(2)}%</div></div>
+    <div class="del" data-del="${s.ticker}">×</div>`;
+  row.addEventListener('click',e=>{
+    if(e.target.dataset.star){ toggleFav(s.ticker); return; }      // ☆をタップ→お気に入り
+    if(e.target.dataset.del){ removeSymbol(s.ticker); return; }    // ×をタップ→このリストから外す
+    current.ticker=s.ticker; render(); renderList(); closeDrawer();
+  });
+  return row;
+}
+function toggleFav(t){ favs=isFav(t)?favs.filter(x=>x!==t):[...favs,t]; store.set('mychart-favs',favs);
+  renderList(); $('hdrFav').style.display=isFav(current.ticker)?'inline':'none'; }
+
+/* --- ティッカー検索（TradingViewの検索窓のような機能） --- */
+// 入力を大文字だけに整える（AAPL, BRK.B などを許可）
+function cleanTicker(v){ return (v||'').trim().toUpperCase().replace(/[^A-Z0-9.\-]/g,''); }
+// 打った銘柄を表示するだけ
+function showTicker(v){
+  const t=cleanTicker(v); if(!t) return;
+  current.ticker=t; render(); renderList(); closeDrawer();
+}
+// 打った銘柄を、いま開いているリストに保存して表示
+function addSymbol(v){
+  const t=cleanTicker(v); if(!t) return;
+  const L=activeList();
+  if(!L.tickers.includes(t)){ L.tickers.push(t); saveLists(); }
+  showTicker(t);
+}
+// いま開いているリストから銘柄を外す
+function removeSymbol(t){
+  const L=activeList();
+  L.tickers=L.tickers.filter(x=>x!==t); saveLists();
+  renderList();
+}
+
+function openDrawer(){ renderTabs(); renderList(); $('drawer').classList.add('open'); $('backdrop').classList.add('open'); }
+function closeDrawer(){ $('drawer').classList.remove('open'); $('backdrop').classList.remove('open'); }
+$('symBtn').addEventListener('click',openDrawer);
+$('closeDrawer').addEventListener('click',closeDrawer);
+$('backdrop').addEventListener('click',closeDrawer);
+
+// 検索窓：表示ボタン / ＋追加ボタン / Enterキー
+$('showBtn').addEventListener('click',()=>showTicker($('tickerInput').value));
+$('addBtn').addEventListener('click',()=>{ addSymbol($('tickerInput').value); $('tickerInput').value=''; });
+$('tickerInput').addEventListener('keydown',e=>{ if(e.key==='Enter') showTicker($('tickerInput').value); });
+
+$('tfButtons').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b||!b.dataset.step) return;   // ADLボタンはここでは扱わない
+  document.querySelectorAll('.tf button[data-step]').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); current.step=b.dataset.step; render();
+});
+$('adlBtn').addEventListener('click',()=>setADL(!adlOn));
+
+/* ⚙ APIキー入力（端末に保存。コードには書かれない） */
+$('gear').addEventListener('click',()=>{
+  const cur=store.get('td-key','');
+  askText('Twelve DataのAPIキーを入力（空にすると削除）\ntwelvedata.com で無料登録すると取得できます', cur, k=>{
+    store.set('td-key', (k||'').trim());
+    for(const key in realCache) delete realCache[key]; // 入れ替えたのでキャッシュ破棄
+    render();
+  });
+});
+
+new ResizeObserver(()=>{ const el=$('chart'); chart.resize(el.clientWidth,el.clientHeight); layoutOverlay(); }).observe($('chart'));
+
+render();
+setADL(adlOn);   // ADL表示のON/OFFを前回の状態に戻す
+} // main() ここまで
+
+// 部品が用意できたら起動（プレビューで読み込めない時は案内を表示）
+whenReady(main);
+</script>
+</body>
+</html>
