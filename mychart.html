@@ -71,6 +71,7 @@
     border-radius:6px; padding:4px 9px; font-size:12px; font-weight:700; cursor:pointer; margin-left:6px; }
   /* z-index（重なり順の番号）が重要：チャート部品は内部で番号を持って前に出るため、
      こちらのレイヤーには明示的に大きい番号を付けて、必ずチャートより上に置く */
+  #indOverlay { position:absolute; inset:0; pointer-events:none; z-index:4; }
   #overlay { position:absolute; inset:0; pointer-events:none; z-index:5; touch-action:none; }
   #catcher { position:absolute; inset:0; display:none; background:transparent; touch-action:none; cursor:crosshair; z-index:6; }
   .tools { display:flex; align-items:center; gap:6px; padding:8px 14px; border-bottom:1px solid var(--line); overflow-x:auto; white-space:nowrap; }
@@ -142,6 +143,10 @@
   #indNew, #indSave { background:var(--accent); color:#fff; }
   /* チャート左上のインジ名チップ（タップで表示/非表示） */
   #indChips { position:absolute; top:6px; left:8px; z-index:7; display:flex; flex-wrap:wrap; gap:4px; max-width:72%; }
+  /* スコア表（インジのtable()が右上に出す） */
+  #indTable { position:absolute; top:6px; right:8px; z-index:7; border-collapse:collapse;
+    font-size:10px; background:rgba(14,17,23,.9); border:1px solid var(--line); display:none; }
+  #indTable td { border:1px solid #2a3242; padding:2px 6px; color:#fff; white-space:nowrap; }
   .ichip { display:flex; align-items:center; gap:6px; background:rgba(22,27,36,.88); border:1px solid var(--line);
     border-radius:6px; padding:3px 8px; font-size:11px; color:var(--text); cursor:pointer; }
   .ichip.off { opacity:.4; }
@@ -210,9 +215,11 @@
   <div id="splitWrap" class="split-1">
     <div id="chartWrap">
       <div id="chart"></div>
+      <svg id="indOverlay"></svg>
       <svg id="overlay"></svg>
       <div id="catcher"></div>
       <div id="indChips"></div>
+    <table id="indTable"></table>
     </div>
     <div id="c2pane">
       <div id="c2bar">
@@ -876,12 +883,33 @@ plot(ta.ema(close, len), { color: col, width: 2, pane: 'main' });
 
 /* 1つのインジのコードを実行して、「引きたい線」と「出したい矢印」を集める */
 function runIndicatorCode(ind){
-  const plots=[], signals=[], inputs=[];
+  const plots=[], signals=[], inputs=[], tables=[], bgs=[];
   const openA=currentCandles.map(c=>c.open),  highA=currentCandles.map(c=>c.high);
   const lowA =currentCandles.map(c=>c.low),   closeA=currentCandles.map(c=>c.close);
   const volA =currentVols.map(v=>v.value);
   const plot  =(series,opt)=>plots.push({series, opt:opt||{}});
   const signal=(arr,opt)=>signals.push({arr, opt:opt||{}});
+  // hbars(項目) … 価格帯別出来高のような「横棒の集まり」を価格チャートに描く
+  //   項目: [{ priceLow, priceHigh, value, color }...] と { maxValue, poc, widthPct }
+  const hbars =(bins,opt)=>plots.push({hbars:bins, opt:opt||{}});
+  // hline(価格, opt) … 1本の水平線（POC線など）
+  const hline =(price,opt)=>plots.push({hline:price, opt:opt||{}});
+  // sym('XLK') … 別銘柄のローソク足を返す（Pineの request.security(別銘柄) 相当）
+  const sym =(ticker,step)=>{
+    const st=step||current.step, key=ticker+'@'+st;
+    const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close, volume:0}));
+    if(realCache[key]) return toArr(realCache[key]);
+    if(store.get('td-key','') && !htfFetching[key]){
+      htfFetching[key]=true;
+      fetchReal(ticker, st).then(raw=>{ realCache[key]=pack(raw); htfFetching[key]=false; applyIndicators(); })
+        .catch(()=>{ htfFetching[key]=false; });
+    }
+    return toArr(sampleDataset(ticker, st));
+  };
+  // table(セル配列) … 右上にスコア表を出す。cells=[{row,col,text,color,bg}...]
+  const table =(cells,opt)=>tables.push({cells, opt:opt||{}});
+  // bg(条件配列, opt) … 条件がtrueの足の背景を色で塗る（Pineの bgcolor 相当）
+  const bg =(arr,opt)=>bgs.push({arr, opt:opt||{}});
   // input('名前', 初期値) … ⚙設定画面から変えられる値。保存済みの値があればそれを使う
   const input=(name,def)=>{
     inputs.push({name, def});
@@ -891,9 +919,9 @@ function runIndicatorCode(ind){
     return v;
   };
   // 書いたコードを関数に変換して実行（open/close/ta/plot などを渡す）
-  const fn=new Function('open','high','low','close','volume','ta','plot','signal','input', ind.code);
-  fn(openA, highA, lowA, closeA, volA, ta, plot, signal, input);
-  return {plots, signals, inputs};
+  const fn=new Function('open','high','low','close','volume','ta','plot','signal','input','hbars','hline','htf','sym','table','bg', ind.code);
+  fn(openA, highA, lowA, closeA, volA, ta, plot, signal, input, hbars, hline, htf, sym, table, bg);
+  return {plots, signals, inputs, tables, bgs};
 }
 
 /* 表示中の自作インジを全部消す */
@@ -901,9 +929,27 @@ function clearCustom(){
   customSeries.forEach(s=>{ try{ chart.removeSeries(s); }catch(e){} });
   customSeries=[];
   if(customMarkers) customMarkers.setMarkers([]);
+  indShapes=[]; if($('indOverlay')) drawIndShapes();
+  if($('indTable')) drawIndTable([]);
 }
 
 /* ONになっている自作インジを全部計算して表示する */
+// htf('3M') … 上位足のローソク足を返す（Pineの request.security 相当）
+// 実データがあればそれ、無ければサンプル。実データは裏で取得して届き次第描き直す
+const htfFetching={};
+function htf(step){
+  const key=current.ticker+'@'+step;
+  const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}));
+  if(realCache[key]) return toArr(realCache[key]);
+  if(store.get('td-key','') && !htfFetching[key]){
+    htfFetching[key]=true;
+    fetchReal(current.ticker, step)
+      .then(raw=>{ realCache[key]=pack(raw); htfFetching[key]=false; applyIndicators(); })
+      .catch(()=>{ htfFetching[key]=false; });
+  }
+  return toArr(sampleDataset(current.ticker, step));
+}
+
 function applyIndicators(){
   clearCustom();
   if(!currentCandles.length){ renderChips(); return; }
@@ -911,12 +957,26 @@ function applyIndicators(){
   // （RSIとADLのように縮尺が違うもの同士が、同じ枠で潰れないように）
   let nextSub=1;
   let markers=[];
+  indShapes=[];
+  const allTables=[];
   indicators.filter(x=>x.on).forEach(ind=>{
     try{
-      const {plots, signals}=runIndicatorCode(ind);
-      // このインジが下の枠を使うなら、専用の枠番号を1つ確保
-      const myPane = plots.some(p=>p.opt.pane!=='main') ? nextSub++ : 0;
+      const {plots, signals, tables, bgs}=runIndicatorCode(ind);
+      if(tables && tables.length) allTables.push(...tables);
+      if(bgs && bgs.length) bgs.forEach(b=>indShapes.push({type:'bg', arr:b.arr, color:b.opt.color||'rgba(156,39,176,0.18)'}));
+      // このインジが下の枠を使うなら、専用の枠番号を1つ確保（線グラフのみが対象）
+      const myPane = plots.some(p=>p.series && p.opt.pane!=='main') ? nextSub++ : 0;
       plots.forEach(p=>{
+        if(p.hbars){   // 価格帯別出来高の横棒
+          indShapes.push({type:'hbars', bins:p.hbars, maxValue:p.opt.maxValue||Math.max(1,...p.hbars.map(b=>b.value)),
+            widthPct:(p.opt.widthPct!=null?p.opt.widthPct:0.35)});
+          return;
+        }
+        if(p.hline!=null){   // 水平線（POC・上位足終値など）
+          indShapes.push({type:'hline', price:p.hline, color:p.opt.color||'#ef5350',
+            width:p.opt.width||1.5, style:p.opt.style||'dashed', text:p.opt.text||''});
+          return;
+        }
         const s=chart.addSeries(LightweightCharts.LineSeries,
           { color:p.opt.color||'#00bcd4', lineWidth:p.opt.width||2,
             lineStyle: p.opt.style==='dashed' ? 2 : p.opt.style==='dotted' ? 1 : 0,
@@ -947,7 +1007,73 @@ function applyIndicators(){
   markers.sort((a,b)=>toEpoch(a.time)-toEpoch(b.time));
   if(markers.length && !customMarkers) customMarkers=LightweightCharts.createSeriesMarkers(candleSeries, []);
   if(customMarkers) customMarkers.setMarkers(markers);
+  drawIndShapes();   // 価格帯別出来高などの横棒を描く
+  drawIndTable(allTables);   // スコア表を描く
   renderChips();   // エラー印も含めて、チップを最新の状態にする
+}
+
+// スコア表を右上に描く（最初のtable()だけ表示）
+function drawIndTable(tables){
+  const el=$('indTable'); if(!el) return;
+  if(!tables || !tables.length){ el.style.display='none'; el.innerHTML=''; return; }
+  const cells=tables[0].cells||[];
+  let maxR=0, maxC=0;
+  cells.forEach(c=>{ if(c.row>maxR)maxR=c.row; if(c.col>maxC)maxC=c.col; });
+  const grid={};
+  cells.forEach(c=>{ grid[c.row+','+c.col]=c; });
+  let html='';
+  for(let r=0;r<=maxR;r++){
+    html+='<tr>';
+    for(let col=0;col<=maxC;col++){
+      const c=grid[r+','+col];
+      if(c) html+='<td style="'+(c.bg?'background:'+c.bg+';':'')+(c.color?'color:'+c.color+';':'')+'">'+
+        String(c.text==null?'':c.text).replace(/</g,'&lt;')+'</td>';
+      else html+='<td></td>';
+    }
+    html+='</tr>';
+  }
+  el.innerHTML=html; el.style.display='table';
+}
+
+// hbars/hline を価格チャートに重ねて描く（縦ズームに追従。横棒は右端に固定）
+let indShapes=[];
+function drawIndShapes(){
+  const svg=$('indOverlay'); if(!svg) return;
+  const w=$('chart').clientWidth, h=$('chart').clientHeight;
+  svg.setAttribute('width',w); svg.setAttribute('height',h);
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+  indShapes.forEach(sh=>{
+    if(sh.type==='bg'){
+      // 条件がtrueの足を、縦の帯で塗る（連続する足はまとめて1本の帯に）
+      const arr=sh.arr; let start=-1;
+      const paint=(a,b)=>{
+        const xa=Lx(a-0.5), xb=Lx(b+0.5);
+        if(xa==null||xb==null) return;
+        svg.appendChild(el('rect',{x:Math.min(xa,xb), y:0, width:Math.abs(xb-xa), height:h, fill:sh.color, style:'pointer-events:none'}));
+      };
+      for(let k=0;k<arr.length;k++){
+        if(arr[k] && start<0) start=k;
+        if((!arr[k]||k===arr.length-1) && start>=0){ paint(start, arr[k]?k:k-1); start=-1; }
+      }
+      return;
+    }
+    if(sh.type==='hbars'){
+      const maxV=sh.maxValue||1, maxW=w*(sh.widthPct||0.35);
+      sh.bins.forEach(b=>{
+        const y1=candleSeries.priceToCoordinate(b.pHigh), y2=candleSeries.priceToCoordinate(b.pLow);
+        if(y1==null||y2==null) return;
+        const bw=(b.value/maxV)*maxW;
+        svg.appendChild(el('rect',{ x:w-bw, y:Math.min(y1,y2), width:Math.max(0,bw),
+          height:Math.max(1,Math.abs(y2-y1)-1), fill:b.color, style:'pointer-events:none' }));
+      });
+    } else if(sh.type==='hline'){
+      const y=candleSeries.priceToCoordinate(sh.price); if(y==null) return;
+      const dash = sh.style==='solid' ? 'none' : sh.style==='dotted' ? '2,5' : '8,5';
+      svg.appendChild(el('line',{x1:0,y1:y,x2:w,y2:y,stroke:sh.color,'stroke-width':sh.width||1.5,'stroke-dasharray':dash,style:'pointer-events:none'}));
+      const t=el('text',{x:6,y:y-4,fill:sh.color,'font-size':10,style:'pointer-events:none'});
+      t.textContent=(sh.text||'')+' '+sh.price.toFixed(2); svg.appendChild(t);
+    }
+  });
 }
 
 /* ---- チャート左上のチップ（名前タップ=表示/非表示、⚙=設定） ---- */
@@ -1668,9 +1794,9 @@ function viewKey(){
   return (r ? r.from+','+r.to : '-')+','+w+','+h+','+py;
 }
 (function syncLoop(){
-  if(drawings.length || creating || pendingPoint){
+  if(drawings.length || creating || pendingPoint || indShapes.length){
     const k=viewKey();
-    if(k!==lastSyncKey){ lastSyncKey=k; layoutOverlay(); }
+    if(k!==lastSyncKey){ lastSyncKey=k; layoutOverlay(); drawIndShapes(); }
   }
   requestAnimationFrame(syncLoop);
 })();
