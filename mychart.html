@@ -918,9 +918,16 @@ function runIndicatorCode(ind){
     if(typeof def==='number'){ v=Number(v); if(!isFinite(v)) v=def; }
     return v;
   };
+  // toggle('名前', 初期ON/OFF) … 表示の切り替え。⚙にチェックボックスが出る
+  const toggle=(name,def)=>{
+    const d=(def!==false);   // 省略時はON
+    inputs.push({name, def:d, isToggle:true});
+    const p=ind.params||{};
+    return (p[name]!==undefined) ? !!p[name] : d;
+  };
   // 書いたコードを関数に変換して実行（open/close/ta/plot などを渡す）
-  const fn=new Function('open','high','low','close','volume','ta','plot','signal','input','hbars','hline','htf','sym','table','bg', ind.code);
-  fn(openA, highA, lowA, closeA, volA, ta, plot, signal, input, hbars, hline, htf, sym, table, bg);
+  const fn=new Function('open','high','low','close','volume','ta','plot','signal','input','hbars','hline','htf','sym','table','bg','toggle', ind.code);
+  fn(openA, highA, lowA, closeA, volA, ta, plot, signal, input, hbars, hline, htf, sym, table, bg, toggle);
   return {plots, signals, inputs, tables, bgs};
 }
 
@@ -1107,9 +1114,15 @@ function openIndSettings(ind){
   }
   inputs.forEach((inp, idx)=>{
     const cur=(ind.params && ind.params[inp.name]!==undefined) ? ind.params[inp.name] : inp.def;
+    const row=document.createElement('div'); row.className='dsRow';
+    if(inp.isToggle){
+      // 表示ON/OFFのチェックボックス
+      row.innerHTML=`<label>${inp.name}</label>`
+        + `<input type="checkbox" data-i="${idx}" data-toggle="1" ${cur?'checked':''} style="flex:none; width:22px; height:22px;" />`;
+      box.appendChild(row); return;
+    }
     const isNum=(typeof inp.def==='number');
     const isColor=(typeof cur==='string' && /^#[0-9a-fA-F]{3,8}$/.test(cur));
-    const row=document.createElement('div'); row.className='dsRow';
     row.innerHTML=`<label>${inp.name}</label>`
       + (isColor
         ? `<input type="color" data-i="${idx}" value="${cur}" />`
@@ -1138,7 +1151,8 @@ $('ipSave').addEventListener('click', ()=>{
     ind.params=ind.params||{};
     $('indParamFields').querySelectorAll('[data-i]').forEach(f=>{
       const inp=inputs[+f.dataset.i]; if(!inp) return;
-      ind.params[inp.name] = (typeof inp.def==='number') ? Number(f.value) : f.value;
+      if(f.dataset.toggle){ ind.params[inp.name] = f.checked; }   // チェックボックス=ON/OFF
+      else ind.params[inp.name] = (typeof inp.def==='number') ? Number(f.value) : f.value;
     });
     saveInds(); applyIndicators();
   }
