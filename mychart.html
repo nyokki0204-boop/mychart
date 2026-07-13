@@ -142,7 +142,10 @@
   #indClose, #indCancel { background:#2a3242; color:var(--text); }
   #indNew, #indSave { background:var(--accent); color:#fff; }
   /* チャート左上のインジ名チップ（タップで表示/非表示） */
-  #indChips { position:absolute; top:6px; left:8px; z-index:7; display:flex; flex-wrap:wrap; gap:4px; max-width:72%; }
+  #indChips { position:absolute; top:6px; left:8px; z-index:7; display:flex; flex-wrap:wrap; gap:4px; max-width:72%; align-items:flex-start; }
+  #indToggleBtn { background:rgba(22,27,36,.88); border:1px solid var(--line); color:var(--muted);
+    border-radius:6px; padding:3px 7px; font-size:11px; cursor:pointer; flex:none; }
+  #indChips.collapsed .ichip { display:none; }   /* 折りたたみ中はチップ本体を隠す */
   /* スコア表（インジのtable()が右上に出す） */
   #indTable { position:absolute; top:6px; right:8px; z-index:7; border-collapse:collapse;
     font-size:10px; background:rgba(14,17,23,.9); border:1px solid var(--line); display:none; }
@@ -1084,9 +1087,24 @@ function drawIndShapes(){
 }
 
 /* ---- チャート左上のチップ（名前タップ=表示/非表示、⚙=設定） ---- */
+let chipsCollapsed = store.get('mychart-chips-collapsed', false);
 function renderChips(){
   const box=$('indChips'); if(!box) return;
   box.innerHTML='';
+  box.classList.toggle('collapsed', chipsCollapsed);
+  // 先頭の開閉ボタン（インジが1つも無い時は何も出さない）
+  if(indicators.length){
+    const btn=document.createElement('button'); btn.id='indToggleBtn';
+    const onCount=indicators.filter(x=>x.on).length;
+    // 折りたたみ中は「👁 インジ(表示中の数)」、展開中は「▾ 隠す」
+    btn.textContent = chipsCollapsed ? ('👁 インジ '+onCount) : '▾ 隠す';
+    btn.addEventListener('click', ()=>{
+      chipsCollapsed=!chipsCollapsed;
+      store.set('mychart-chips-collapsed', chipsCollapsed);
+      renderChips();
+    });
+    box.appendChild(btn);
+  }
   indicators.forEach(ind=>{
     const c=document.createElement('div');
     c.className='ichip'+(ind.on?'':' off')+(ind._err?' err':'');
