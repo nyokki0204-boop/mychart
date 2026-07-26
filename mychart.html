@@ -373,6 +373,10 @@ let diskMem=null;
    容量が足りない時は、使い捨ての方を捨てて大事なデータを守る。
    （以前は失敗しても無言で、設定が黙って消える作りだった） */
 let storeWarned=false;
+/* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
+   起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
+const APP_VERSION='v7 (週足の区切り・前日比 修正版)';
+
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
   set(k, v){
@@ -2419,7 +2423,7 @@ $('tfButtons').addEventListener('click',e=>{
 /* ⚙ APIキー入力（端末に保存。コードには書かれない） */
 $('gear').addEventListener('click',()=>{
   const cur=store.get('td-key','');
-  askText('Twelve DataのAPIキーを入力（空にすると削除）\ntwelvedata.com で無料登録すると取得できます', cur, k=>{
+  askText('Twelve DataのAPIキーを入力（空にすると削除）\ntwelvedata.com で無料登録すると取得できます\n\nアプリの版数: '+APP_VERSION, cur, k=>{
     store.set('td-key', (k||'').trim());
     for(const key in realCache) delete realCache[key]; // 入れ替えたのでキャッシュ破棄
     try{ localStorage.removeItem(DISK_KEY); }catch(e){}  // 端末の保存も消す
@@ -2703,6 +2707,7 @@ renderBackupInfo();
 
 render();
 setLayout(layoutMode);   // 前回のレイアウト（1画面/上下/左右）を復元
+setTimeout(()=>{ const f=$('foot'); if(f) f.textContent='起動しました  '+APP_VERSION; }, 300);
 if(store.get('mychart-max', false)) setMax(true);   // 前回「最大化」なら復元
 } // main() ここまで
 
