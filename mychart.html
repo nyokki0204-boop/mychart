@@ -478,7 +478,14 @@ function toWeeks(rows){
   const candles=[], volumes=[];
   let bucket=[], curKey='';
   // 「今日が世界の始まりから何週目か」を計算して、同じ週の足をまとめる
-  const keyOf=r=>{ const days=Math.floor(Date.parse(r.datetime.slice(0,10)+'T00:00:00')/86400000); return Math.floor((days+3)/7); };
+  // 日付文字列から直接「何日目か」を出す。
+  // Date.parse は端末のタイムゾーンで解釈されるため、日本(+9時間)だと
+  // 1日ぶんズレて、月曜が前の週に入ってしまっていた
+  const keyOf=r=>{
+    const [y,m,d]=r.datetime.slice(0,10).split('-').map(Number);
+    const days=Math.floor(Date.UTC(y,(m||1)-1,d||1)/86400000);
+    return Math.floor((days+3)/7);     // 月曜はじまりの週番号
+  };
   const flush=()=>{
     if(!bucket.length) return;
     const b=bundle(bucket, bucket[0].datetime.slice(0,10));
@@ -964,7 +971,12 @@ function updateLegend(c,v){
   $('lg-o').textContent=fmtPrice(c.open); $('lg-h').textContent=fmtPrice(c.high);
   $('lg-l').textContent=fmtPrice(c.low);  $('lg-c').textContent=fmtPrice(c.close);
   $('lg-vol').textContent=v?fmtVol(v.value):'-';
-  const chg=(c.close-c.open)/c.open*100, el=$('lg-chg');
+  // 「前日比」は“ひとつ前の足の終値”と比べるのが正しい。
+  // （以前はその足の始値と比べていたため、TradingViewと数値が合わなかった）
+  const i=currentCandles.findIndex(x=>x.time===c.time);
+  const prev = i>0 ? currentCandles[i-1] : null;
+  const base = (prev && prev.close) ? prev.close : c.open;
+  const chg=(c.close-base)/base*100, el=$('lg-chg');
   el.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%'; el.className=chg>=0?'up':'down';
 }
 chart.subscribeCrosshairMove(p=>{
