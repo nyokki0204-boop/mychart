@@ -67,8 +67,9 @@
     background:rgba(22,27,36,.9); border:1px solid var(--line); color:var(--text);
     border-radius:6px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer; }
   body.max #unmaxBtn { display:block; }
-  #maxBtn { background:transparent; border:1px solid var(--line); color:var(--muted);
+  #maxBtn, #refreshBtn { background:transparent; border:1px solid var(--line); color:var(--muted);
     border-radius:6px; padding:4px 9px; font-size:12px; font-weight:700; cursor:pointer; margin-left:6px; }
+  #refreshBtn.busy { opacity:.5; }
   /* z-index（重なり順の番号）が重要：チャート部品は内部で番号を持って前に出るため、
      こちらのレイヤーには明示的に大きい番号を付けて、必ずチャートより上に置く */
   #indOverlay { position:absolute; inset:0; pointer-events:none; z-index:4; }
@@ -162,6 +163,7 @@
     border-radius:6px; padding:3px 8px; font-size:11px; color:var(--text); cursor:pointer; }
   .ichip.off { opacity:.4; }
   .ichip.err { border-color:#ef5350; }   /* エラーのあるインジは赤枠 */
+  .ichip.warn { border-color:#f5a623; }  /* サンプルで計算中は橙枠＋⚠ */
   .ichip .g { color:var(--muted); font-size:12px; }
   /* 設定フォームの部品（線の設定・インジの設定で共用） */
   .dsRow { display:flex; align-items:center; gap:10px; margin:10px 0; }
@@ -182,6 +184,7 @@
     </button>
     <span class="badge sample" id="badge">サンプル</span>
     <button id="layoutBtn" title="画面の分割を切り替え">1画面</button>
+    <button id="refreshBtn" title="最新データに更新">⟳</button>
     <button id="maxBtn" title="チャートを最大化">⛶</button>
     <button class="gear" id="gear" title="APIキー設定" style="margin-left:0;">⚙</button>
   </header>
@@ -209,6 +212,7 @@
     <button data-tool="pos">± 損益</button>
     <button data-tool="vp">▤ 出来高P</button>
     <input type="color" id="colorPick" value="#f5c518" title="線の色" />
+    <button id="undoBtn" title="元に戻す">↶ 戻す</button>
     <button id="styleBtn" style="display:none;">線の設定</button>
     <button id="delOneBtn" style="display:none; border-color:#ef5350; color:#ef5350;">選択を削除</button>
     <button id="clearBtn">消去</button>
@@ -296,6 +300,32 @@
     </div>
   </div>
 
+  <!-- 2択を選ぶ画面（ブラウザのconfirmはホーム画面アプリで動かないため自前で用意）-->
+  <div class="modalBack" id="askBack">
+    <div class="modal">
+      <div class="mtitle" id="askTitle"></div>
+      <div class="mbtns" style="flex-direction:column; gap:8px;">
+        <button id="askA" style="background:var(--accent); color:#fff;"></button>
+        <button id="askB" style="background:#2a3242; color:var(--text);"></button>
+        <button id="askCancel" style="background:transparent; color:var(--muted); border:1px solid var(--line);">やめる</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- バックアップを文字で渡す画面（ダウンロードが効かない環境用） -->
+  <div class="modalBack" id="bkTextBack">
+    <div class="modal" style="width:92%; max-width:560px;">
+      <div class="mtitle" id="bkTextTitle"></div>
+      <textarea id="bkTextArea" readonly spellcheck="false"
+        style="width:100%; height:180px; background:#0e1117; border:1px solid var(--line); color:var(--text);
+               border-radius:6px; padding:9px; font-size:11px; font-family:ui-monospace,monospace;"></textarea>
+      <div class="mbtns">
+        <button id="bkTextClose" style="background:#2a3242; color:var(--text);">閉じる</button>
+        <button id="bkTextCopy" style="background:var(--accent); color:#fff;">全部コピー</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 自作インジケーターの管理・編集画面 -->
   <div class="modalBack" id="indBack">
     <div class="modal" style="width:92%; max-width:560px;">
@@ -307,6 +337,8 @@
       </div>
       <div id="indEditor" style="display:none;">
         <input id="indName" placeholder="インジ名（例: RSI14）" autocomplete="off" />
+        <div style="font-size:11px; color:#f5a623; margin-bottom:6px; line-height:1.5;">
+          ⚠ 他人からもらったコードは貼らないでください（保存データを読み取れてしまいます）</div>
         <textarea id="indCode" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
         <div class="mbtns">
           <button id="indCancel">戻る</button>
@@ -330,9 +362,37 @@
    保存ヘルパー（お気に入り・APIキーを端末に記憶）
    ・公開版では閉じても残る。プレビュー内はリロードで消える場合あり
    ========================================================= */
+// 端末の保存を一度読んだらメモリに持っておくための入れ物
+// （store より前に宣言しておく。後ろに置くと、保存失敗時の救済処理で
+//   「宣言前アクセス」の例外が出てアプリ全体が止まるため）
+let diskMem=null;
+
+/* 保存の優先順位
+   ウォッチリスト・描画・インジ＝二度と戻らない大事なデータ
+   価格キャッシュ＝取り直せる使い捨てデータ
+   容量が足りない時は、使い捨ての方を捨てて大事なデータを守る。
+   （以前は失敗しても無言で、設定が黙って消える作りだった） */
+let storeWarned=false;
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
-  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+  set(k, v){
+    const text=JSON.stringify(v);
+    try { localStorage.setItem(k, text); return true; } catch(e){}
+    // ①価格キャッシュを丸ごと捨てて再挑戦
+    try{
+      localStorage.removeItem('mychart-cache-v1');
+      diskMem=null;
+      localStorage.setItem(k, text);
+      const f=document.getElementById('foot');
+      if(f) f.textContent='保存領域が不足したため、価格データの一時保存を整理しました（設定は保存済み）';
+      return true;
+    }catch(e2){}
+    // ②それでもダメなら警告（黙って失敗させない）
+    const f=document.getElementById('foot');
+    if(f) f.innerHTML='<span class="err">保存できませんでした（端末の空き容量不足）。バックアップの書き出しをおすすめします</span>';
+    storeWarned=true;
+    return false;
+  }
 };
 
 /* エラーが起きたら、下のバーに表示する（今後は画面を見せてもらうだけで原因が分かる） */
@@ -467,9 +527,30 @@ function symInfo(t){ return SYMBOLS.find(s=>s.ticker===t) || { ticker:t, name:'�
    ② 実データ取得（Twelve Data）
    キーが無い/失敗した時は例外を投げ、呼び出し側でサンプルに切替
    ========================================================= */
+/* APIの流量制御：無料枠は「1分あたり8回」。
+   これを超えると失敗するので、超えそうな時は自動で少し待ってから投げる。
+   （銘柄をスワイプで次々変えた時に上限に当たるのを防ぐ） */
+const API_LIMIT=8, API_WINDOW=60000;
+let apiTimes=[], apiChain=Promise.resolve();
+function apiGate(){
+  apiChain = apiChain.then(async ()=>{
+    let now=Date.now();
+    apiTimes=apiTimes.filter(t=>now-t<API_WINDOW);
+    if(apiTimes.length>=API_LIMIT){
+      const wait=API_WINDOW-(now-apiTimes[0])+150;
+      setFoot('API上限（1分8回）のため '+Math.ceil(wait/1000)+'秒待機中…');
+      await new Promise(r=>setTimeout(r, wait));
+      apiTimes=apiTimes.filter(t=>Date.now()-t<API_WINDOW);
+    }
+    apiTimes.push(Date.now());
+  });
+  return apiChain;
+}
+
 async function fetchReal(symbol, step){
   const key = store.get('td-key','');
   if(!key) throw { kind:'nokey' };
+  await apiGate();   // 上限に当たらないよう順番待ち
   const tf = TF[step];
   const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}`
             + `&interval=${tf.api}&outputsize=${tf.size}&apikey=${key}`;
@@ -601,6 +682,119 @@ function sampleDataset(ticker,step){
   return sampleCache[key]=pack(raw);
 }
 
+/* =========================================================
+   API節約のしくみ（2本立て）
+   ① 日足を1回取れば、週足・月足・3ヶ月・6ヶ月は自分で束ねて作る
+      → 時間足を変えてもAPIを使わない
+   ② 取ったデータを端末に保存し、次回開いた時も使い回す
+      → 同じ銘柄の2回目以降はAPIを使わない
+   ========================================================= */
+const DISK_KEY='mychart-cache-v1';
+const DISK_MAX=10;                    // 保存する銘柄の数（端末の容量を使いすぎないため）
+const TTL_DAILY=12*3600*1000;         // 日足系は12時間で作り直す
+const TTL_INTRA=15*60*1000;           // 65分足は15分
+
+/* 保存形式を圧縮する（項目名の繰り返しをやめて配列にする → 約6割減）*/
+function packRows(raw){
+  return { t:raw.candles.map(c=>c.time),
+           o:raw.candles.map(c=>c.open), h:raw.candles.map(c=>c.high),
+           l:raw.candles.map(c=>c.low),  c:raw.candles.map(c=>c.close),
+           v:raw.volumes.map(x=>x.value) };
+}
+function unpackRows(z){
+  if(!z || !z.t) return null;
+  return { candles:z.t.map((t,i)=>({time:t, open:z.o[i], high:z.h[i], low:z.l[i], close:z.c[i]})),
+           volumes:z.t.map((t,i)=>({time:t, value:z.v[i]})) };
+}
+
+/* 端末の保存は「一度読んだらメモリに持っておく」
+   （毎回JSONを解析すると、時間足を切り替えるたびに画面が引っかかるため）*/
+function diskLoad(){
+  if(diskMem) return diskMem;
+  try{ diskMem=JSON.parse(localStorage.getItem(DISK_KEY)||'{}'); }catch(e){ diskMem={}; }
+  return diskMem;
+}
+function diskSave(obj){
+  diskMem=obj;
+  try{ localStorage.setItem(DISK_KEY, JSON.stringify(obj)); }
+  catch(e){   // 容量オーバー時は古いものから捨てて再挑戦
+    const keys=Object.keys(obj).sort((a,b)=>(obj[a].at||0)-(obj[b].at||0));
+    for(let i=0;i<Math.ceil(keys.length/2);i++) delete obj[keys[i]];
+    try{ localStorage.setItem(DISK_KEY, JSON.stringify(obj)); }catch(e2){}
+  }
+}
+// 生データを端末に保存（圧縮して保存）
+function diskPut(ticker, kind, raw){
+  const d=diskLoad();
+  d[ticker+'@'+kind]={ at:Date.now(), z:packRows(raw) };
+  const keys=Object.keys(d);
+  if(keys.length>DISK_MAX){        // 多すぎたら古い順に削除
+    keys.sort((a,b)=>(d[a].at||0)-(d[b].at||0));
+    for(let i=0;i<keys.length-DISK_MAX;i++) delete d[keys[i]];
+  }
+  diskSave(d);
+}
+// 端末の保存から取り出す（古すぎるものは無効）
+function diskGet(ticker, kind){
+  const d=diskLoad(), e=d[ticker+'@'+kind];
+  if(!e) return null;
+  const ttl = kind==='65m' ? TTL_INTRA : TTL_DAILY;
+  if(Date.now()-(e.at||0) > ttl) return null;
+  return e.z ? unpackRows(e.z) : (e.raw||null);   // 旧形式もそのまま読める
+}
+
+/* 日足の生データから、他の時間足を自分で作る（APIを使わない） */
+function deriveFrom(dailyRaw, step){
+  if(step==='1d') return dailyRaw;
+  // 束ねる関数に渡せる形（datetime付き）に変換
+  const rows=dailyRaw.candles.map((c,i)=>({
+    datetime:String(c.time), open:c.open, high:c.high, low:c.low, close:c.close,
+    volume: dailyRaw.volumes[i] ? dailyRaw.volumes[i].value : 0 }));
+  if(step==='1w') return toWeeks(rows);
+  if(step==='1M') return toMonths(rows,1);
+  if(step==='3M') return toMonths(rows,3);
+  if(step==='6M') return toMonths(rows,6);
+  return dailyRaw;
+}
+
+/* データ取得の唯一の入口。
+   65分足だけは専用に取り、それ以外は「日足1回」で全部まかなう */
+/* メモリに置く銘柄数の上限。
+   これが無いと、スワイプで銘柄を見るたびに溜まり続け、
+   100銘柄ほどでSafariが重くなる／落ちることがある。
+   捨てても端末の保存が受け止めるので、API回数は増えない */
+const MEM_MAX_SYMBOLS=20;
+let memOrder=[];                     // 使った順（古い順に捨てる）
+function memTouch(ticker){
+  memOrder=memOrder.filter(t=>t!==ticker);
+  memOrder.push(ticker);
+  while(memOrder.length>MEM_MAX_SYMBOLS){
+    const old=memOrder.shift();
+    if(old===current.ticker || old===c2.ticker) { memOrder.push(old); continue; }  // 表示中は残す
+    Object.keys(realCache).forEach(k=>{ if(k.startsWith(old+'@')) delete realCache[k]; });
+  }
+}
+
+async function loadData(ticker, step){
+  const memKey=ticker+'@'+step;
+  memTouch(ticker);
+  if(realCache[memKey]) return realCache[memKey];
+
+  if(step==='65m'){
+    let raw=diskGet(ticker,'65m');
+    if(!raw){ raw=await fetchReal(ticker,'65m'); diskPut(ticker,'65m',raw); }
+    return realCache[memKey]=pack(raw);
+  }
+  // 日足を用意（端末の保存 → 無ければAPIで1回だけ取得）
+  let daily=realCache[ticker+'@__daily'];
+  if(!daily){
+    daily=diskGet(ticker,'1d');
+    if(!daily){ daily=await fetchReal(ticker,'1d'); diskPut(ticker,'1d',daily); }
+    realCache[ticker+'@__daily']=daily;
+  }
+  return realCache[memKey]=pack(deriveFrom(daily, step));
+}
+
 /* 実データのキャッシュ（APIの回数を節約） */
 const realCache={};
 
@@ -696,26 +890,40 @@ function setMode(mode, msg){
     $('foot').innerHTML = msg ? `<span class="err">${msg}</span>` : 'サンプル表示中。⚙からAPIキーを入れると実データになります'; }
 }
 
+/* 描画の順番を守るための番号札。
+   スワイプで素早く銘柄を変えた時、遅れて届いた古い応答で
+   画面が上書きされる（銘柄名と中身がズレる）のを防ぐ */
+let renderToken=0;
 async function render(){
+  const my=++renderToken;                    // この呼び出しの番号札
   const cacheKey=current.ticker+'@'+current.step;
-  $('hdrTicker').textContent=current.ticker;
-  $('hdrFav').style.display=isFav(current.ticker)?'inline':'none';
-  store.set('mychart-last', current.ticker);
+  const ticker=current.ticker, step=current.step;
+  $('hdrTicker').textContent=ticker;
+  $('hdrFav').style.display=isFav(ticker)?'inline':'none';
+  store.set('mychart-last', ticker);
 
-  if(realCache[cacheKey]){ draw(realCache[cacheKey]); setMode('real'); return; }
+  if(realCache[cacheKey]){
+    draw(realCache[cacheKey]); setMode('real');
+    priceRemember(ticker, realCache[cacheKey].candles);
+    return;
+  }
 
   if(store.get('td-key','')){
     $('foot').textContent='読み込み中…';
     try{
-      const d=pack(await fetchReal(current.ticker,current.step));
-      realCache[cacheKey]=d; draw(d); setMode('real'); renderList();
+      const d=await loadData(ticker, step);
+      if(my!==renderToken) return;           // ← 古い応答は捨てる（最新の表示を壊さない）
+      draw(d); setMode('real');
+      priceRemember(ticker, d.candles);      // 実データが取れた時だけ価格を記憶
+      renderList();
     }catch(err){
-      draw(sampleDataset(current.ticker,current.step));
+      if(my!==renderToken) return;
+      draw(sampleDataset(ticker, step));
       if(err.kind==='api') setMode('sample','APIエラー: '+err.message+'（サンプル表示）');
       else setMode('sample','取得できず（通信/CORS）→ サンプル表示');
     }
   } else {
-    draw(sampleDataset(current.ticker,current.step)); setMode('sample');
+    draw(sampleDataset(ticker, step)); setMode('sample');
   }
 }
 
@@ -935,9 +1143,10 @@ function runIndicatorCode(ind){
     if(realCache[key]) return toArr(realCache[key]);
     if(store.get('td-key','') && !htfFetching[key]){
       htfFetching[key]=true;
-      fetchReal(ticker, st).then(raw=>{ realCache[key]=pack(raw); htfFetching[key]=false; applyIndicators(); })
-        .catch(()=>{ htfFetching[key]=false; });
+      loadData(ticker, st).then(()=>{ htfFetching[key]=false; indDataNote=''; applyIndicators(); })
+        .catch(e=>{ htfFetching[key]=false; indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; applyIndicators(); });
     }
+    if(store.get('td-key','')) indSampleFlag=true;
     return toArr(sampleDataset(ticker, st));
   };
   // table(セル配列) … 右上にスコア表を出す。cells=[{row,col,text,color,bg}...]
@@ -978,16 +1187,20 @@ function clearCustom(){
 // htf('3M') … 上位足のローソク足を返す（Pineの request.security 相当）
 // 実データがあればそれ、無ければサンプル。実データは裏で取得して届き次第描き直す
 const htfFetching={};
+// このインジが「本物でないデータ」を使ったかの印（サンプル混入の警告に使う）
+let indSampleFlag=false, indDataNote='';
 function htf(step){
   const key=current.ticker+'@'+step;
   const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}));
   if(realCache[key]) return toArr(realCache[key]);
   if(store.get('td-key','') && !htfFetching[key]){
     htfFetching[key]=true;
-    fetchReal(current.ticker, step)
-      .then(raw=>{ realCache[key]=pack(raw); htfFetching[key]=false; applyIndicators(); })
-      .catch(()=>{ htfFetching[key]=false; });
+    loadData(current.ticker, step)
+      .then(()=>{ htfFetching[key]=false; indDataNote=''; applyIndicators(); })
+      .catch(e=>{ htfFetching[key]=false; indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; applyIndicators(); });
   }
+  // APIキーがある＝本物を期待している時だけ「サンプル混入」を警告する
+  if(store.get('td-key','')) indSampleFlag=true;
   return toArr(sampleDataset(current.ticker, step));
 }
 
@@ -1002,7 +1215,9 @@ function applyIndicators(){
   const allTables=[];
   indicators.filter(x=>x.on).forEach(ind=>{
     try{
+      indSampleFlag=false;   // このインジの計算前にリセット
       const {plots, signals, tables, bgs}=runIndicatorCode(ind);
+      if(indSampleFlag) ind._sample=true; else delete ind._sample;
       if(tables && tables.length) allTables.push(...tables);
       if(bgs && bgs.length) bgs.forEach(b=>indShapes.push({type:'bg', arr:b.arr, color:b.opt.color||'rgba(156,39,176,0.18)'}));
       // このインジが下の枠を使うなら、専用の枠番号を1つ確保（線グラフのみが対象）
@@ -1138,9 +1353,10 @@ function renderChips(){
   }
   indicators.forEach(ind=>{
     const c=document.createElement('div');
-    c.className='ichip'+(ind.on?'':' off')+(ind._err?' err':'');
+    c.className='ichip'+(ind.on?'':' off')+(ind._err?' err':'')+((ind._sample&&ind.on)?' warn':'');
     if(ind._err) c.title=ind._err;
-    c.innerHTML=`<span>${ind.name}</span><span class="g" data-g="1">⚙</span>`;
+    else if(ind._sample) c.title='上位足/他銘柄が実データでないため、サンプルで計算しています'+(indDataNote?('：'+indDataNote):'');
+    c.innerHTML=`<span>${ind.name}</span>${(ind._sample&&ind.on)?'<span class="g">⚠</span>':''}<span class="g" data-g="1">⚙</span>`;
     c.addEventListener('click', e=>{
       if(e.target.dataset.g){ openIndSettings(ind); return; }   // ⚙=設定
       ind.on=!ind.on; saveInds(); applyIndicators();            // 名前タップ=ON/OFF
@@ -1211,7 +1427,7 @@ $('ipSave').addEventListener('click', ()=>{
 /* ---- 管理画面（一覧・新規作成・編集・ON/OFF・削除） ---- */
 function saveInds(){
   // _err(エラーの印)は一時的なメモなので、保存には含めない
-  store.set('custom-inds', indicators.map(ind=>{ const c={...ind}; delete c._err; return c; }));
+  store.set('custom-inds', indicators.map(ind=>{ const c={...ind}; delete c._err; delete c._sample; return c; }));
 }
 function openIndMgr(){
   renderIndList();
@@ -1310,6 +1526,24 @@ function logicalToTs(l){
 function xToTs(x){ const l=xToL(x); if(l==null) return null; const ts=logicalToTs(l); return ts==null?null:Math.round(ts); }
 function tsToX(ts){ const l=tsToLogical(ts); return l==null?null:Lx(l); }
 
+/* 描画の「元に戻す」用の履歴（直近20手ぶん）
+   消す・動かす・追加する の直前の状態を控えておく */
+let undoStack=[];
+let dragUndoSnapshot=null, dragMoved=false;   // ドラッグ中の記録用
+function pushUndo(){
+  try{ undoStack.push(JSON.stringify(drawings.map(d=>{ const c={...d}; delete c._vp; return c; }))); }catch(e){ return; }
+  if(undoStack.length>20) undoStack.shift();
+}
+function doUndo(){
+  if(!undoStack.length){ setFoot('戻せる操作がありません'); return; }
+  try{
+    drawings=JSON.parse(undoStack.pop());
+    drawings.forEach(d=>{ if(!d.id) d.id=uid++; uid=Math.max(uid, d.id+1); });
+    selected=null; hideDelBtn(); saveDrawings(); redrawOverlay();
+    setFoot('元に戻しました（残り'+undoStack.length+'手）');
+  }catch(e){ setFoot('戻せませんでした'); }
+}
+
 /* --- 銘柄ごとの保存・読み込み（全時間足で共有） --- */
 function dKey(){ return current.ticker; }
 function saveDrawings(){
@@ -1318,6 +1552,7 @@ function saveDrawings(){
   store.set('mychart-drawings', drawingsMap);
 }
 function loadDrawings(){
+  undoStack=[];               // 銘柄が変わったら履歴もリセット
   drawings = drawingsMap[dKey()] || [];
   drawings.forEach(d=>{ if(!d.id) d.id=uid++; uid=Math.max(uid, d.id+1); });
   selected=null; hideDelBtn();
@@ -1679,6 +1914,7 @@ window.addEventListener('pointerup', ()=>{
   if(!creating) return;
   const c=creating; creating=null; createStart=null;
   if(c.type==='hline' || c.type==='arrow' || c.type==='pos'){
+    pushUndo();
     c.id=uid++; drawings.push(c); saveDrawings();
     setFoot(c.type==='hline' ? '水平線を追加（掴んで上下に動かせます）'
           : c.type==='arrow' ? '矢印を追加（掴んで動かせます）'
@@ -1691,6 +1927,7 @@ window.addEventListener('pointerup', ()=>{
     redrawOverlay(); return;
   }
   if(c.a.t===c.b.t){ setFoot('もう少し横まで引っぱってください'); redrawOverlay(); return; }
+  pushUndo();
   c.id=uid++; drawings.push(c); saveDrawings();
   setFoot((c.type==='rect'?'計測ボックス': c.type==='vp'?'価格帯別出来高':'トレンドライン')+'を追加（掴んで動かせます）');
   setTool(null); redrawOverlay();
@@ -1705,6 +1942,9 @@ svg.addEventListener('pointerdown', e=>{
   const t=e.target, id=t.getAttribute&&t.getAttribute('data-id'), role=t.getAttribute&&t.getAttribute('data-role');
   if(!id) return; // 既存の図形の上以外は、チャート自身の操作(パン等)に譲る
   const d=drawings.find(x=>x.id===+id); if(!d) return;
+  // 動かす前の状態を控える（実際に動いた時だけ履歴に入れる。下のendPointer参照）
+  dragUndoSnapshot=JSON.stringify(drawings.map(x=>{ const c={...x}; delete c._vp; return c; }));
+  dragMoved=false;
   selected=d.id; showDelBtn();
   // 太さは変えず、下のバーの文字で「選択中」を知らせる
   const names={hline:'水平線', rect:'計測ボックス', trend:'トレンドライン', arrow:'矢印', poly:'折線', pos:'損益ツール', vp:'価格帯別出来高'};
@@ -1727,6 +1967,7 @@ svg.addEventListener('touchstart', e=>{
 // → setPointerCapture が失敗しても、指がどこに動いてもドラッグを追跡できる
 window.addEventListener('pointermove', e=>{
   if(!drag) return;
+  dragMoved=true;              // 実際に動かした
   const p=pos(e);
   const d=drag.d, o=drag.orig;
   if(d.type==='hline'){ const pr=yToP(p.y); if(pr!=null) d.price=pr; }
@@ -1772,7 +2013,18 @@ window.addEventListener('pointermove', e=>{
   }
   layoutOverlay();   // 位置だけ更新（作り直さない）
 });
-function endPointer(){ if(drag) saveDrawings(); drag=null; }  // 動かし終わったら保存
+function endPointer(){
+  if(drag){
+    // 実際に動かした時だけ履歴に残す（掴んで離しただけでは残さない）
+    if(dragMoved && dragUndoSnapshot){
+      undoStack.push(dragUndoSnapshot);
+      if(undoStack.length>20) undoStack.shift();
+    }
+    saveDrawings();
+  }
+  dragUndoSnapshot=null; dragMoved=false;
+  drag=null;
+}
 window.addEventListener('pointerup', endPointer);
 window.addEventListener('pointercancel', endPointer);
 // iPhoneで、線を動かしている最中に「画面スクロール」が割り込んで
@@ -1801,6 +2053,7 @@ function setTool(t){
 // 折線を確定する（点が2個以上たまっていたら1本の折線として保存）
 function commitPoly(){
   if(pendingPoly && pendingPoly.length>=2){
+    pushUndo();
     drawings.push({ id:uid++, type:'poly', color:drawColor, pts:pendingPoly });
     saveDrawings();
     setFoot('折線を追加（点を掴んで動かせます）');
@@ -1809,6 +2062,7 @@ function commitPoly(){
   redrawOverlay();
 }
 function clearDrawings(){ drawings=[]; drag=null; pendingPoint=null; pendingPoly=null; creating=null; createStart=null; selected=null; hideDelBtn(); saveDrawings(); redrawOverlay(); }
+// ドラッグ開始時にも履歴を残す（動かす前の位置に戻せるように）
 
 /* 「線の設定」…選択中の線の色・太さ・線種を変える */
 function openDrawingStyle(){
@@ -1822,6 +2076,7 @@ $('dsCancel').addEventListener('click', ()=>$('dsBack').classList.remove('open')
 $('dsOk').addEventListener('click', ()=>{
   const d=drawings.find(x=>x.id===selected);
   if(d){
+    pushUndo();
     d.color=$('dsColor').value;
     d.width=Number($('dsWidth').value);
     d.style=$('dsStyle').value;
@@ -1833,9 +2088,11 @@ $('dsOk').addEventListener('click', ()=>{
 
 $('toolbar').addEventListener('click', e=>{
   const b=e.target.closest('button'); if(!b) return;
+  if(b.id==='undoBtn'){ doUndo(); return; }
   if(b.id==='styleBtn'){ openDrawingStyle(); return; }
-  if(b.id==='clearBtn'){ clearDrawings(); setFoot('この銘柄の描画を消去しました'); return; }
+  if(b.id==='clearBtn'){ pushUndo(); clearDrawings(); setFoot('この銘柄の描画を消去しました（↶戻すで復元できます）'); return; }
   if(b.id==='delOneBtn'){                            // 選択中の1本だけ削除
+    pushUndo();
     drawings=drawings.filter(x=>x.id!==selected);
     selected=null; hideDelBtn(); saveDrawings(); redrawOverlay();
     setFoot('選択した描画を削除しました'); return;
@@ -1869,6 +2126,20 @@ function viewKey(){
    ブラウザ内蔵のprompt/confirmは、ホーム画面に追加したアプリ等では
    まったく動かないことがあるため、自前の画面を使う
    ========================================================= */
+/* 2択を聞く（ブラウザのconfirmは、ホーム画面に追加したアプリでは
+   無反応になることがあるため、自前の画面を使う） */
+let askCb=null;
+function askChoice(title, labelA, labelB, cb){
+  $('askTitle').textContent=title;
+  $('askA').textContent=labelA;
+  $('askB').textContent=labelB;
+  askCb=cb;
+  $('askBack').classList.add('open');
+}
+$('askA').addEventListener('click', ()=>{ $('askBack').classList.remove('open'); const c=askCb; askCb=null; if(c) c('A'); });
+$('askB').addEventListener('click', ()=>{ $('askBack').classList.remove('open'); const c=askCb; askCb=null; if(c) c('B'); });
+$('askCancel').addEventListener('click', ()=>{ $('askBack').classList.remove('open'); askCb=null; });
+
 let modalCb=null;
 function askText(title, initial, cb){
   $('modalTitle').textContent=title;
@@ -1888,11 +2159,34 @@ $('modalCancel').addEventListener('click',()=>{ $('modalBack').classList.remove(
 /* =========================================================
    ⑥ ウォッチリスト（複数リスト対応）
    ========================================================= */
+/* 価格メモ … ウォッチリスト表示専用の軽い保存
+   （銘柄→最新値と前日比だけ。160銘柄でも約8KBしか使わない）
+   以前は未取得の銘柄ごとに20年分の架空データを作っていて、
+   銘柄が増えるとウォッチリストを開くたびに数秒固まっていた */
+const PRICES_KEY='mychart-prices';
+let pricesMem=null;
+function pricesLoad(){
+  if(pricesMem) return pricesMem;
+  try{ pricesMem=JSON.parse(localStorage.getItem(PRICES_KEY)||'{}'); }catch(e){ pricesMem={}; }
+  return pricesMem;
+}
+function priceRemember(ticker, candles){
+  if(!candles || candles.length<2) return;
+  const last=candles[candles.length-1], prev=candles[candles.length-2];
+  if(!prev.close) return;
+  const p=pricesLoad();
+  p[ticker]={ p:last.close, c:(last.close-prev.close)/prev.close*100, at:Date.now() };
+  try{ localStorage.setItem(PRICES_KEY, JSON.stringify(p)); }catch(e){}
+}
+// 価格を返す。分からない場合は null（架空の数字は出さない）
 function priceOf(ticker){
-  // 実データがあればそれ、無ければサンプルの日足から最新値と前日比
-  const d = realCache[ticker+'@1d'] || sampleDataset(ticker,'1d');
-  const c=d.candles, last=c[c.length-1], prev=c[c.length-2];
-  return { price:last.close, chg:(last.close-prev.close)/prev.close*100 };
+  const d=realCache[ticker+'@1d'];
+  if(d && d.candles && d.candles.length>1){
+    const c=d.candles, last=c[c.length-1], prev=c[c.length-2];
+    return { price:last.close, chg:(last.close-prev.close)/prev.close*100 };
+  }
+  const m=pricesLoad()[ticker];
+  return m ? { price:m.p, chg:m.c } : null;
 }
 
 /* リスト切り替えタブ（＋新規 / ✎名前変更 / 🗑削除） */
@@ -1949,28 +2243,51 @@ function renderTabs(){
   }
 }
 
+/* 一覧の描画。
+   銘柄が多いと行を一度に全部作る負担が大きいので、
+   最初の40件だけ即座に出し、残りは少しずつ足す（画面が固まらない） */
+let listRenderToken=0;
 function renderList(){
   const list=$('list'); list.innerHTML='';
+  const my=++listRenderToken;
   const tickers=activeList().tickers;
   if(!tickers.length){ list.appendChild(label('「＋追加」で銘柄を入れてください')); return; }
   const fav=tickers.filter(t=>isFav(t)), oth=tickers.filter(t=>!isFav(t));
-  if(fav.length) list.appendChild(label('★ お気に入り'));
-  fav.forEach(t=>list.appendChild(rowEl(symInfo(t))));
-  if(fav.length) list.appendChild(label('リストの銘柄'));
-  oth.forEach(t=>list.appendChild(rowEl(symInfo(t))));
+  const items=[];
+  if(fav.length){ items.push({label:'★ お気に入り'}); fav.forEach(t=>items.push({t})); items.push({label:'リストの銘柄'}); }
+  oth.forEach(t=>items.push({t}));
+
+  const CHUNK=40;
+  let i=0;
+  const step=()=>{
+    if(my!==listRenderToken) return;          // 別の描画が始まっていたら中断
+    const frag=document.createDocumentFragment();
+    const end=Math.min(i+CHUNK, items.length);
+    for(; i<end; i++){
+      const it=items[i];
+      frag.appendChild(it.label ? label(it.label) : rowEl(symInfo(it.t)));
+    }
+    list.appendChild(frag);
+    if(i<items.length) requestAnimationFrame(step);   // 続きは次の描画タイミングで
+  };
+  step();
 }
 function label(t){ const d=document.createElement('div'); d.className='sec-label'; d.textContent=t; return d; }
 function rowEl(s){
-  const {price,chg}=priceOf(s.ticker);
+  const pr=priceOf(s.ticker);
   const row=document.createElement('div'); row.className='row'+(s.ticker===current.ticker?' active':'');
   row.innerHTML=`
     <div class="star ${isFav(s.ticker)?'on':''}" data-star="${s.ticker}">${isFav(s.ticker)?'★':'☆'}</div>
     <div><div class="tk">${s.ticker}</div><div class="nm">${s.name}</div></div>
-    <div class="rt mono"><div class="price">${price.toFixed(2)}</div>
-      <div class="chg ${chg>=0?'up':'down'}">${chg>=0?'+':''}${chg.toFixed(2)}%</div></div>
+    <div class="rt mono">${ pr
+      ? `<div class="price">${pr.price.toFixed(2)}</div>
+         <div class="chg ${pr.chg>=0?'up':'down'}">${pr.chg>=0?'+':''}${pr.chg.toFixed(2)}%</div>`
+      : `<div class="price" style="opacity:.35" title="チャートを開くと価格を取得します">—</div>` }</div>
+    <div class="del" data-move="${s.ticker}" title="別のリストへ移動">⇄</div>
     <div class="del" data-del="${s.ticker}">×</div>`;
   row.addEventListener('click',e=>{
     if(e.target.dataset.star){ toggleFav(s.ticker); return; }      // ☆をタップ→お気に入り
+    if(e.target.dataset.move){ moveSymbol(s.ticker); return; }     // ⇄をタップ→別リストへ移動
     if(e.target.dataset.del){ removeSymbol(s.ticker); return; }    // ×をタップ→このリストから外す
     if(symbolTarget===2){ c2.ticker=s.ticker; render2(); closeDrawer(); return; }
     current.ticker=s.ticker; render(); renderList(); closeDrawer();
@@ -2010,6 +2327,23 @@ function addSymbol(v){
     ? added.length+'銘柄を追加: '+added.join(', ')
     : 'すべて追加済みでした');
 }
+/* 銘柄を別のリストへ移動する（移動先を選ぶ画面を出す） */
+function moveSymbol(t){
+  const others=lists.filter(L=>L.id!==activeListId);
+  if(!others.length){ setFoot('移動先のリストがありません（＋で作成してください）'); return; }
+  const box=$('indList');   // 既存のモーダルを流用せず、簡易な選択を出す
+  const names=others.map((L,i)=>(i+1)+'. '+L.name).join('\n');
+  askText('「'+t+'」をどのリストへ移動しますか？\n番号を入力してください\n'+names, '1', v=>{
+    const idx=parseInt(v,10)-1;
+    if(isNaN(idx) || idx<0 || idx>=others.length){ setFoot('番号が正しくありません'); return; }
+    const to=others[idx], from=activeList();
+    from.tickers=from.tickers.filter(x=>x!==t);
+    if(!to.tickers.includes(t)) to.tickers.push(t);
+    saveLists(); renderList();
+    setFoot(t+' を「'+to.name+'」へ移動しました');
+  });
+}
+
 // いま開いているリストから銘柄を外す
 function removeSymbol(t){
   const L=activeList();
@@ -2045,6 +2379,8 @@ $('gear').addEventListener('click',()=>{
   askText('Twelve DataのAPIキーを入力（空にすると削除）\ntwelvedata.com で無料登録すると取得できます', cur, k=>{
     store.set('td-key', (k||'').trim());
     for(const key in realCache) delete realCache[key]; // 入れ替えたのでキャッシュ破棄
+    try{ localStorage.removeItem(DISK_KEY); }catch(e){}  // 端末の保存も消す
+    diskMem=null;
     render(); render2();
   });
 });
@@ -2079,16 +2415,20 @@ function ensureChart2(){
 }
 
 // 2画面目を描画（実データ→ダメならサンプル。時間足はメインと共通）
+let render2Token=0;
 async function render2(){
   if(layoutMode==='1' || !chart2) return;
   $('c2sym').textContent=c2.ticker+' ▾';
   store.set('mychart-c2', c2.ticker);
-  const cacheKey=c2.ticker+'@'+current.step;
+  const my=++render2Token;
+  const t2=c2.ticker, cacheKey=t2+'@'+current.step;
   let d=realCache[cacheKey];
   if(!d && store.get('td-key','')){
-    try{ d=pack(await fetchReal(c2.ticker, current.step)); realCache[cacheKey]=d; }catch(e){}
+    try{ d=await loadData(t2, current.step); }catch(e){}
+    if(my!==render2Token) return;            // 古い応答は捨てる
   }
-  if(!d) d=sampleDataset(c2.ticker, current.step);
+  if(d) priceRemember(t2, d.candles);
+  if(!d) d=sampleDataset(t2, current.step);
   candle2.setData(d.candles); volume2.setData(d.vols);
   chart2.applyOptions({ timeScale:{ timeVisible: current.step==='65m', secondsVisible:false } });
   const n2=d.candles.length;
@@ -2125,6 +2465,32 @@ function setMax(on){
   store.set('mychart-max', on);
   setTimeout(resizeAll, 60);   // 帯が消えて大きさが変わるので、少し待ってから測り直す
 }
+/* 今すぐ最新に：表示中の銘柄のキャッシュを捨てて取り直す
+   （他の銘柄の保存は残すので、APIの無駄遣いにならない） */
+async function refreshNow(){
+  const btn=$('refreshBtn');
+  if(btn.classList.contains('busy')) return;   // 連打防止
+  btn.classList.add('busy');
+  const targets=[current.ticker];
+  if(layoutMode!=='1' && c2.ticker && !targets.includes(c2.ticker)) targets.push(c2.ticker);
+  // メモリと端末の保存から、対象銘柄ぶんだけ削除
+  targets.forEach(t=>{
+    Object.keys(realCache).forEach(k=>{ if(k.startsWith(t+'@')) delete realCache[k]; });
+    const d=diskLoad();
+    Object.keys(d).forEach(k=>{ if(k.startsWith(t+'@')) delete d[k]; });
+    diskSave(d);
+  });
+  setFoot('最新データを取得中…');
+  try{
+    await render();
+    if(layoutMode!=='1') await render2();
+    applyIndicators();
+    const now=new Date();
+    setFoot('最新に更新しました（'+String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0')+'）');
+  }catch(e){ setFoot('更新できませんでした: '+(e&&e.message?e.message:'')); }
+  btn.classList.remove('busy');
+}
+$('refreshBtn').addEventListener('click', refreshNow);
 $('maxBtn').addEventListener('click', ()=>setMax(true));
 $('unmaxBtn').addEventListener('click', ()=>setMax(false));
 // 画面の回転やウィンドウサイズ変更にも自動で合わせる
@@ -2184,45 +2550,94 @@ if(navigator.storage && navigator.storage.persist){
 // アプリが使っている保存キー一覧（バックアップの対象）
 const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-last',
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
-  'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at'];
+  'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices'];
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
-function exportSettings(){
+function buildBackup(includeKey){
   const data={ _app:'mychart', _at:new Date().toISOString() };
-  BK_KEYS.forEach(k=>{ const v=localStorage.getItem(k); if(v!=null) data[k]=v; });
-  const text=JSON.stringify(data);
-  const blob=new Blob([text],{type:'application/json'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  const d=new Date(), pad=n=>String(n).padStart(2,'0');
-  a.href=url; a.download=`mychart-settings-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.json`;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  BK_KEYS.forEach(k=>{
+    if(k==='td-key' && !includeKey) return;      // APIキーを含めない選択もできる
+    const v=localStorage.getItem(k); if(v!=null) data[k]=v;
+  });
+  return JSON.stringify(data);
+}
+function exportSettings(){
+  askChoice('バックアップにAPIキーを含めますか？',
+    'APIキーを含めない（安全・推奨）',
+    'APIキーも含める（復元がラク）',
+    ans=>doExport(ans==='B'));
+}
+function doExport(includeKey){
+  const text=buildBackup(includeKey);
+  let downloaded=false;
+  try{
+    const blob=new Blob([text],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    const d=new Date(), pad=n=>String(n).padStart(2,'0');
+    a.href=url; a.download=`mychart-settings-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    downloaded=true;
+  }catch(e){}
   store.set('mychart-backup-at', Date.now());
   renderBackupInfo();
-  setFoot('設定を書き出しました（「ファイル」アプリに保存してください）');
+  // ホーム画面アプリ等でダウンロードが効かない環境向けに、文字でも渡せるようにする
+  showBackupText(text, downloaded, includeKey);
 }
+
+
+// 書き出した内容を文字でも見せる（ホーム画面アプリではダウンロードが効かないことがある）
+function showBackupText(text, downloaded, includeKey){
+  $('bkTextTitle').textContent = (includeKey ? '【APIキーを含みます・取扱注意】' : '【APIキーは含みません】')
+    + (downloaded
+    ? 'ファイルに書き出しました。うまく保存できない場合は、下の文字をコピーしてメモ等に貼り付けて保管してください。'
+    : 'ダウンロードできない環境のようです。下の文字をコピーして、メモ等に貼り付けて保管してください。');
+  $('bkTextArea').value=text;
+  $('bkTextBack').classList.add('open');
+}
+$('bkTextClose').addEventListener('click', ()=>$('bkTextBack').classList.remove('open'));
+$('bkTextCopy').addEventListener('click', ()=>{
+  const ta=$('bkTextArea');
+  ta.select(); ta.setSelectionRange(0, 999999);
+  try{
+    if(navigator.clipboard) navigator.clipboard.writeText(ta.value);
+    else document.execCommand('copy');
+    setFoot('バックアップをコピーしました。メモアプリ等に貼り付けて保管してください');
+  }catch(e){ setFoot('コピーできませんでした。長押しして手動でコピーしてください'); }
+});
 
 // 読み込み：書き出したファイルを選んで、設定を復元する
 function importSettings(){
+  askChoice('バックアップの読み込み方法を選んでください',
+    'ファイルを選ぶ', '文字を貼り付ける',
+    ans=>{
+      if(ans==='B'){ askText('バックアップの文字を貼り付けてください', '', v=>applyBackupText(v)); return; }
+      importFromFile();
+    });
+}
+function importFromFile(){
   const inp=document.createElement('input');
   inp.type='file'; inp.accept='application/json,.json,text/plain';
   inp.addEventListener('change', ()=>{
     const f=inp.files && inp.files[0]; if(!f) return;
     const r=new FileReader();
-    r.onload=()=>{
-      try{
-        const data=JSON.parse(String(r.result));
-        if(!data || data._app!=='mychart') throw new Error('このアプリのバックアップではないようです');
-        let n=0;
-        BK_KEYS.forEach(k=>{ if(data[k]!=null){ localStorage.setItem(k, data[k]); n++; } });
-        setFoot(n+'件の設定を復元しました。画面を読み込み直します…');
-        setTimeout(()=>location.reload(), 800);
-      }catch(e){ setFoot('読み込めませんでした: '+e.message); }
-    };
+    r.onload=()=>{ applyBackupText(String(r.result)); };
     r.readAsText(f);
   });
   inp.click();
+}
+
+// バックアップの中身を実際に適用する（ファイル・文字貼り付け共通）
+function applyBackupText(text){
+  try{
+    const data=JSON.parse(text);
+    if(!data || data._app!=='mychart') throw new Error('このアプリのバックアップではないようです');
+    let n=0;
+    BK_KEYS.forEach(k=>{ if(data[k]!=null){ localStorage.setItem(k, data[k]); n++; } });
+    setFoot(n+'件の設定を復元しました。画面を読み込み直します…');
+    setTimeout(()=>location.reload(), 800);
+  }catch(e){ setFoot('読み込めませんでした: '+(e&&e.message?e.message:'')); }
 }
 
 // 最後にバックアップした日を表示（30日以上前なら注意を促す）
