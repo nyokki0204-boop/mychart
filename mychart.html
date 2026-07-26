@@ -376,7 +376,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v8 (対数目盛り追加)';
+const APP_VERSION='v9 (出来高を下段に分離)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -854,13 +854,16 @@ const chart=LightweightCharts.createChart(document.getElementById('chart'),{
 });
 const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
   upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
-candleSeries.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.20}});
-const volumeSeries=chart.addSeries(LightweightCharts.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:'vol'});
-volumeSeries.priceScale().applyOptions({scaleMargins:{top:0.78,bottom:0}});
+candleSeries.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
+// 出来高は価格チャートに重ねず、下の別枠に置く（TradingViewと同じ構成）。
+// 重ねると価格の表示領域が2割ほど食われ、ローソク足が小さく潰れてしまうため
+const volumeSeries=chart.addSeries(LightweightCharts.HistogramSeries,
+  {priceFormat:{type:'volume'}, priceScaleId:'right'}, 1);
+volumeSeries.priceScale().applyOptions({scaleMargins:{top:0.10,bottom:0}});
 // 出来高の移動平均線（出来高と同じ目盛りに重ねる。期間は下のVOL_MA_LENで変えられる）
 const VOL_MA_LEN = 20;
 const volMASeries=chart.addSeries(LightweightCharts.LineSeries,
-  { color:'#64b5f6', lineWidth:1, priceScaleId:'vol', priceLineVisible:false, lastValueVisible:false });
+  { color:'#64b5f6', lineWidth:1, priceScaleId:'right', priceLineVisible:false, lastValueVisible:false }, 1);
 
 /* =========================================================
    ⑤ 状態＆描画（実データ→ダメならサンプル）
@@ -903,6 +906,15 @@ function draw(d){
   applyIndicators();            // 自作インジも計算し直す
   // 65分足のときだけ、横軸に時刻も表示する
   chart.applyOptions({ timeScale:{ timeVisible: current.step==='65m', secondsVisible:false } });
+  // 枠の高さ配分：価格を広く、出来高は下に小さく
+  try{
+    const panes=chart.panes();
+    if(panes.length>1){
+      const total=$('chart').clientHeight;
+      panes[0].setHeight(Math.round(total*0.74));
+      panes[1].setHeight(Math.round(total*0.26));
+    }
+  }catch(e){}
   // データが長い時は「直近250本」だけ表示して開始（左にスクロールすると過去までさかのぼれる）
   const n=d.candles.length;
   if(n>320) chart.timeScale().setVisibleLogicalRange({from:n-250, to:n+3});
@@ -1257,7 +1269,7 @@ function applyIndicators(){
   if(!currentCandles.length){ renderChips(); return; }
   // 下の枠は「インジごとに専用の枠」を1つずつ割り当てる
   // （RSIとADLのように縮尺が違うもの同士が、同じ枠で潰れないように）
-  let nextSub=1;
+  let nextSub=2;          // 0=価格 / 1=出来高 / 2以降=自作インジ
   let markers=[];
   indShapes=[];
   const allTables=[];
@@ -1269,7 +1281,7 @@ function applyIndicators(){
       if(tables && tables.length) allTables.push(...tables);
       if(bgs && bgs.length) bgs.forEach(b=>indShapes.push({type:'bg', arr:b.arr, color:b.opt.color||'rgba(156,39,176,0.18)'}));
       // このインジが下の枠を使うなら、専用の枠番号を1つ確保（線グラフのみが対象）
-      const myPane = plots.some(p=>p.series && p.opt.pane!=='main') ? nextSub++ : 0;
+      const myPane = plots.some(p=>p.series && p.opt.pane!=='main') ? nextSub++ : 0;   // 1=出来高の枠なので2から
       plots.forEach(p=>{
         if(p.hbars){   // 価格帯別出来高の横棒
           indShapes.push({type:'hbars', bins:p.hbars, maxValue:p.opt.maxValue||Math.max(1,...p.hbars.map(b=>b.value)),
@@ -2456,9 +2468,12 @@ function ensureChart2(){
   });
   candle2=chart2.addSeries(LightweightCharts.CandlestickSeries,{
     upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
-  candle2.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.20}});
-  volume2=chart2.addSeries(LightweightCharts.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:''});
-  volume2.priceScale().applyOptions({scaleMargins:{top:0.8,bottom:0}});
+  candle2.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
+  volume2=chart2.addSeries(LightweightCharts.HistogramSeries,
+    {priceFormat:{type:'volume'}, priceScaleId:'right'}, 1);
+  volume2.priceScale().applyOptions({scaleMargins:{top:0.10,bottom:0}});
+  try{ const p2=chart2.panes(); if(p2.length>1){ const h=$('chart2').clientHeight;
+    p2[0].setHeight(Math.round(h*0.74)); p2[1].setHeight(Math.round(h*0.26)); } }catch(e){}
   new ResizeObserver(()=>{ const el=$('chart2'); chart2.resize(el.clientWidth, el.clientHeight); }).observe($('chart2'));
 }
 
