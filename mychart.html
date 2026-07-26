@@ -547,6 +547,15 @@ function apiGate(){
   return apiChain;
 }
 
+/* APIから来た1本が使える足かどうかを判定する */
+function isSaneRow(v){
+  if(!v || typeof v.datetime!=='string' || v.datetime.length<10) return false;
+  const o=+v.open, h=+v.high, l=+v.low, c=+v.close;
+  if(![o,h,l,c].every(x=>isFinite(x) && x>0)) return false;   // 数値でない・0以下は捨てる
+  if(h<l) return false;                                        // 高値が安値を下回るのは異常
+  return true;
+}
+
 async function fetchReal(symbol, step){
   const key = store.get('td-key','');
   if(!key) throw { kind:'nokey' };
@@ -558,11 +567,15 @@ async function fetchReal(symbol, step){
   const json = await res.json();
   if(json.status === 'error' || !json.values) throw { kind:'api', message: json.message || '取得失敗' };
   // Twelve Dataは「新しい順」で返すので、古い順に並べ替える
-  const rows = json.values.slice().reverse();
+  // 受け取った1本1本を検証し、壊れている足は捨てる。
+  // （日付が無い・価格が数値でない等をそのまま通すと、
+  //   チャートが崩れたり、移動平均が全部NaNになって以降の足まで汚染される）
+  const rows = json.values.slice().reverse().filter(isSaneRow);
+  if(!rows.length) throw { kind:'api', message:'有効なデータがありません（銘柄名をご確認ください）' };
   if(tf.agg==='65') return to65(rows);              // 65分足に束ねる
   if(tf.agg)        return toMonths(rows, tf.agg);  // 3ヶ月/6ヶ月足に束ねる
-  const candles = rows.map(v => ({ time:v.datetime.slice(0,10), open:+v.open, high:+v.high, low:+v.low, close:+v.close }));
-  const volumes = rows.map(v => ({ time:v.datetime.slice(0,10), value:+(v.volume||0) }));
+  const candles = rows.map(v => ({ time:String(v.datetime).slice(0,10), open:+v.open, high:+v.high, low:+v.low, close:+v.close }));
+  const volumes = rows.map(v => ({ time:String(v.datetime).slice(0,10), value:+(v.volume||0) }));
   return { candles, volumes };
 }
 
@@ -768,7 +781,8 @@ let memOrder=[];                     // 使った順（古い順に捨てる）
 function memTouch(ticker){
   memOrder=memOrder.filter(t=>t!==ticker);
   memOrder.push(ticker);
-  while(memOrder.length>MEM_MAX_SYMBOLS){
+  let guard=memOrder.length+2;   // 保護対象ばかりで終わらなくなるのを防ぐ安全弁
+  while(memOrder.length>MEM_MAX_SYMBOLS && guard-- > 0){
     const old=memOrder.shift();
     if(old===current.ticker || old===c2.ticker) { memOrder.push(old); continue; }  // 表示中は残す
     Object.keys(realCache).forEach(k=>{ if(k.startsWith(old+'@')) delete realCache[k]; });
@@ -871,6 +885,8 @@ function draw(d){
   currentCandles=d.candles;
   currentVols=d.vols;                          // ADL計算に使う出来高
   epochs=d.candles.map(c=>toEpoch(c.time));   // 各バーの時刻(秒数)一覧を作る
+  // 価格軸と十字線の精度を、この銘柄の価格帯に合わせる（低位株対策）
+  if(d.candles.length) applyPricePrecision(candleSeries, d.candles[d.candles.length-1].close);
   loadDrawings();               // この銘柄に保存してある線を読み込む（全時間足共通）
   applyIndicators();            // 自作インジも計算し直す
   // 65分足のときだけ、横軸に時刻も表示する
@@ -879,7 +895,7 @@ function draw(d){
   const n=d.candles.length;
   if(n>320) chart.timeScale().setVisibleLogicalRange({from:n-250, to:n+3});
   else chart.timeScale().fitContent();
-  lastCandle=d.candles[d.candles.length-1]; lastVol=d.vols[d.vols.length-1];
+  lastCandle=d.candles[d.candles.length-1]||null; lastVol=d.vols[d.vols.length-1]||null;
   updateLegend(lastCandle,lastVol);
   redrawOverlay();
 }
@@ -928,10 +944,25 @@ async function render(){
 }
 
 function fmtVol(n){ return n>=1_000_000 ? (n/1_000_000).toFixed(2)+'M' : (n/1000).toFixed(0)+'K'; }
+/* 価格の表示桁数を、その価格帯に合わせて自動で変える。
+   低位株を小数2桁で丸めると 0.0234 も 0.0218 も「0.02」になり、
+   損切りと利確の区別がつかなくなるため */
+function priceDigits(p){
+  const a=Math.abs(p||0);
+  if(!a) return 2;                       // 0や未取得は通常の2桁
+  return a>=1 ? 2 : a>=0.1 ? 3 : a>=0.01 ? 4 : 6;
+}
+function fmtPrice(p){ return (p==null||!isFinite(p)) ? '-' : p.toFixed(priceDigits(p)); }
+/* チャート本体（価格軸・十字線）の精度も銘柄に合わせて変える */
+const MIN_MOVE={2:0.01, 3:0.001, 4:0.0001, 6:0.000001};   // 計算で作ると誤差が出るため表で持つ
+function applyPricePrecision(series, lastClose){
+  const d=priceDigits(lastClose);
+  try{ series.applyOptions({ priceFormat:{ type:'price', precision:d, minMove:MIN_MOVE[d] } }); }catch(e){}
+}
 function updateLegend(c,v){
   if(!c) return;
-  $('lg-o').textContent=c.open.toFixed(2); $('lg-h').textContent=c.high.toFixed(2);
-  $('lg-l').textContent=c.low.toFixed(2);  $('lg-c').textContent=c.close.toFixed(2);
+  $('lg-o').textContent=fmtPrice(c.open); $('lg-h').textContent=fmtPrice(c.high);
+  $('lg-l').textContent=fmtPrice(c.low);  $('lg-c').textContent=fmtPrice(c.close);
   $('lg-vol').textContent=v?fmtVol(v.value):'-';
   const chg=(c.close-c.open)/c.open*100, el=$('lg-chg');
   el.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%'; el.className=chg>=0?'up':'down';
@@ -1327,7 +1358,7 @@ function drawIndShapes(){
       const dash = sh.style==='solid' ? 'none' : sh.style==='dotted' ? '2,5' : '8,5';
       svg.appendChild(el('line',{x1:0,y1:y,x2:w,y2:y,stroke:sh.color,'stroke-width':sh.width||1.5,'stroke-dasharray':dash,style:'pointer-events:none'}));
       const t=el('text',{x:6,y:y-4,fill:sh.color,'font-size':10,style:'pointer-events:none'});
-      t.textContent=(sh.text||'')+' '+sh.price.toFixed(2); svg.appendChild(t);
+      t.textContent=(sh.text||'')+' '+fmtPrice(sh.price); svg.appendChild(t);
     }
   });
 }
@@ -1673,7 +1704,7 @@ function layoutOne(d){
     const W=svg.getAttribute('width');
     setPos(parts.hit,{x1:0,y1:y,x2:W,y2:y});
     setPos(parts.vis,{x1:0,y1:y,x2:W,y2:y,'stroke-width':d.width||1.5,'stroke-dasharray':dashOf(d.style)});
-    setPos(parts.txt,{y:y-4}); parts.txt.textContent=d.price.toFixed(2);
+    setPos(parts.txt,{y:y-4}); parts.txt.textContent=fmtPrice(d.price);
     return;
   }
   if(d.type==='arrow'){
@@ -1836,7 +1867,7 @@ let creating=null, createStart=null, createMoved=false;  // 引っぱり中の�
 // 計測の途中経過（+3.2% / 値幅 / 本数）を作る
 function statsText(a,b){
   const pct=(b.p-a.p)/a.p*100, diff=b.p-a.p, bars=Math.round(Math.abs(tsToLogical(b.t)-tsToLogical(a.t)));
-  return (pct>=0?'+':'')+pct.toFixed(2)+'% / '+(diff>=0?'+':'')+diff.toFixed(2)+' / '+bars+'本';
+  return (pct>=0?'+':'')+pct.toFixed(2)+'% / '+(diff>=0?'+':'')+fmtPrice(Math.abs(diff))+' / '+bars+'本';
 }
 // 画面上の位置（クライアント座標）→ チャート左上からのピクセル
 function chartXY(e){ const r=$('chart').getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; }
@@ -1852,7 +1883,7 @@ $('catcher').addEventListener('pointerdown', e=>{
     // 押している間は上下に微調整でき、離した場所に置かれる
     creating={ id:0, type:'hline', color:drawColor, price };
     createStart={x,y}; createMoved=false;
-    setFoot('価格 '+price.toFixed(2)+'（離すと確定）');
+    setFoot('価格 '+fmtPrice(price)+'（離すと確定）');
     redrawOverlay(); return;
   }
   if(tool==='au' || tool==='ad'){
@@ -1895,7 +1926,7 @@ window.addEventListener('pointermove', e=>{
   const {x,y}=chartXY(e);
   if(createStart && Math.hypot(x-createStart.x, y-createStart.y)>10) createMoved=true;
   if(creating.type==='hline'){
-    const pr=yToP(y); if(pr!=null){ creating.price=pr; setFoot('価格 '+pr.toFixed(2)+'（離すと確定）'); }
+    const pr=yToP(y); if(pr!=null){ creating.price=pr; setFoot('価格 '+fmtPrice(pr)+'（離すと確定）'); }
   } else if(creating.type==='arrow' || creating.type==='pos'){
     const t2=xToTs(x), pr=yToP(y);
     if(t2!=null&&pr!=null){
@@ -1948,7 +1979,7 @@ svg.addEventListener('pointerdown', e=>{
   selected=d.id; showDelBtn();
   // 太さは変えず、下のバーの文字で「選択中」を知らせる
   const names={hline:'水平線', rect:'計測ボックス', trend:'トレンドライン', arrow:'矢印', poly:'折線', pos:'損益ツール', vp:'価格帯別出来高'};
-  setFoot((d.type==='hline' ? '水平線 '+d.price.toFixed(2) : names[d.type]||'図形')
+  setFoot((d.type==='hline' ? '水平線 '+fmtPrice(d.price) : names[d.type]||'図形')
     + ' を選択中（「線の設定」「選択を削除」が使えます）');
   drag={ d, role, vi:+(t.getAttribute('data-vi')||-1),   // 折線のどの頂点を掴んだか
          start:pos(e), orig:JSON.parse(JSON.stringify(d)),
@@ -2280,7 +2311,7 @@ function rowEl(s){
     <div class="star ${isFav(s.ticker)?'on':''}" data-star="${s.ticker}">${isFav(s.ticker)?'★':'☆'}</div>
     <div><div class="tk">${s.ticker}</div><div class="nm">${s.name}</div></div>
     <div class="rt mono">${ pr
-      ? `<div class="price">${pr.price.toFixed(2)}</div>
+      ? `<div class="price">${fmtPrice(pr.price)}</div>
          <div class="chg ${pr.chg>=0?'up':'down'}">${pr.chg>=0?'+':''}${pr.chg.toFixed(2)}%</div>`
       : `<div class="price" style="opacity:.35" title="チャートを開くと価格を取得します">—</div>` }</div>
     <div class="del" data-move="${s.ticker}" title="別のリストへ移動">⇄</div>
@@ -2429,14 +2460,19 @@ async function render2(){
   }
   if(d) priceRemember(t2, d.candles);
   if(!d) d=sampleDataset(t2, current.step);
+  if(d.candles.length) applyPricePrecision(candle2, d.candles[d.candles.length-1].close);
   candle2.setData(d.candles); volume2.setData(d.vols);
   chart2.applyOptions({ timeScale:{ timeVisible: current.step==='65m', secondsVisible:false } });
   const n2=d.candles.length;
   if(n2>320) chart2.timeScale().setVisibleLogicalRange({from:n2-250, to:n2+3});
   else chart2.timeScale().fitContent();
   const last=d.candles[d.candles.length-1], prev=d.candles[d.candles.length-2];
-  const chg=(last.close-prev.close)/prev.close*100;
-  $('c2price').textContent=last.close.toFixed(2)+' ('+(chg>=0?'+':'')+chg.toFixed(2)+'%)';
+  if(last && prev && prev.close){
+    const chg=(last.close-prev.close)/prev.close*100;
+    $('c2price').textContent=fmtPrice(last.close)+' ('+(chg>=0?'+':'')+chg.toFixed(2)+'%)';
+  } else {
+    $('c2price').textContent = last ? fmtPrice(last.close) : '-';
+  }
 }
 
 // レイアウト切り替え（'1'→'v'→'h'→'1'…）
