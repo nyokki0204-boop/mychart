@@ -198,7 +198,8 @@
       <button data-step="1M">月足</button>
       <button data-step="3M">3ヶ月</button>
       <button data-step="6M">6ヶ月</button>
-      <button id="indBtn" title="自作インジケーター" style="border-left:1px solid var(--line); border-radius:0;">インジ</button>
+      <button id="scaleBtn" title="価格目盛りの切り替え" style="border-left:1px solid var(--line); border-radius:0;">対数</button>
+      <button id="indBtn" title="自作インジケーター">インジ</button>
     </div>
   </div>
 
@@ -375,7 +376,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v7 (週足の区切り・前日比 修正版)';
+const APP_VERSION='v8 (対数目盛り追加)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -853,7 +854,7 @@ const chart=LightweightCharts.createChart(document.getElementById('chart'),{
 });
 const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
   upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
-candleSeries.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.28}});
+candleSeries.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.20}});
 const volumeSeries=chart.addSeries(LightweightCharts.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:'vol'});
 volumeSeries.priceScale().applyOptions({scaleMargins:{top:0.78,bottom:0}});
 // 出来高の移動平均線（出来高と同じ目盛りに重ねる。期間は下のVOL_MA_LENで変えられる）
@@ -2455,7 +2456,7 @@ function ensureChart2(){
   });
   candle2=chart2.addSeries(LightweightCharts.CandlestickSeries,{
     upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
-  candle2.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.25}});
+  candle2.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.20}});
   volume2=chart2.addSeries(LightweightCharts.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:''});
   volume2.priceScale().applyOptions({scaleMargins:{top:0.8,bottom:0}});
   new ResizeObserver(()=>{ const el=$('chart2'); chart2.resize(el.clientWidth, el.clientHeight); }).observe($('chart2'));
@@ -2505,6 +2506,23 @@ function setLayout(m){
   }, 60);
 }
 $('layoutBtn').addEventListener('click', ()=>setLayout(layoutMode==='1' ? 'v' : layoutMode==='v' ? 'h' : '1'));
+
+/* 価格目盛りの切り替え（対数 ⇔ 普通）
+   株価が数倍〜十数倍動く銘柄は、普通の目盛りだと安値圏が潰れて見えない。
+   対数目盛りなら「何％動いたか」が同じ幅で表示され、TradingViewと同じ見え方になる */
+let logScale = store.get('mychart-logscale', false);
+function applyScaleMode(){
+  const opts={ mode: logScale ? 1 : 0 };   // 1=対数 / 0=普通
+  try{ candleSeries.priceScale().applyOptions(opts); }catch(e){}
+  try{ if(candle2) candle2.priceScale().applyOptions(opts); }catch(e){}
+  const b=$('scaleBtn');
+  if(b){ b.textContent = logScale ? '対数' : '普通'; b.classList.toggle('active', logScale); }
+}
+$('scaleBtn').addEventListener('click', ()=>{
+  logScale=!logScale; store.set('mychart-logscale', logScale);
+  applyScaleMode();
+  setFoot(logScale ? '対数目盛り（値動きの％が同じ幅で見える）' : '普通の目盛り（値幅が同じ幅で見える）');
+});
 
 /* チャート最大化（ヘッダー等を隠してチャートを画面いっぱいに） */
 function resizeAll(){
@@ -2707,6 +2725,7 @@ renderBackupInfo();
 
 render();
 setLayout(layoutMode);   // 前回のレイアウト（1画面/上下/左右）を復元
+applyScaleMode();        // 前回選んだ目盛り（対数/普通）を復元
 setTimeout(()=>{ const f=$('foot'); if(f) f.textContent='起動しました  '+APP_VERSION; }, 300);
 if(store.get('mychart-max', false)) setMax(true);   // 前回「最大化」なら復元
 } // main() ここまで
