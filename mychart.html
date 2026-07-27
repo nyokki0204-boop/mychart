@@ -376,7 +376,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v9 (出来高を下段に分離)';
+const APP_VERSION='v16 (線が価格ラベルに被る問題を修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -463,8 +463,13 @@ function to65(rows){
   let bucket=[], curDay='';
   const flush=()=>{
     if(!bucket.length) return;
-    // 時刻つきの足は「秒数（エポック秒）」で持つのがチャート部品の作法
-    const t=Math.floor(new Date(bucket[0].datetime.replace(' ','T')).getTime()/1000);
+    // 時刻つきの足は「秒数（エポック秒）」で持つのがチャート部品の作法。
+    // 端末のタイムゾーンで解釈すると9時間ズレるため、UTCで組み立てる
+    const dt=bucket[0].datetime.replace(' ','T');
+    const [dpart,tpart]=dt.split('T');
+    const [Y,M,D]=dpart.split('-').map(Number);
+    const [h,mi]=(tpart||'00:00').split(':').map(Number);
+    const t=Math.floor(Date.UTC(Y,(M||1)-1,D||1,h||0,mi||0)/1000);
     const b=bundle(bucket, t);
     candles.push(b.candle); volumes.push(b.volume); bucket=[];
   };
@@ -610,10 +615,12 @@ function dailyRowsFor(ticker){
 
   // 平日（月〜金）の日付を過去20年ぶん集める
   const dates=[]; const d=new Date();
+  // 日付の計算はUTCでそろえる（端末のタイムゾーンで1日ズレるのを防ぐ）
+  d.setUTCHours(12,0,0,0);
   while(dates.length<5040){                     // 252営業日 × 20年
-    const dow=d.getDay();
+    const dow=d.getUTCDay();
     if(dow!==0 && dow!==6) dates.push(d.toISOString().slice(0,10));
-    d.setDate(d.getDate()-1);
+    d.setUTCDate(d.getUTCDate()-1);
   }
   dates.reverse();
 
@@ -648,7 +655,9 @@ function make65FromDaily(rows){
   const days=rows.slice(-45);                       // 直近45営業日ぶん
   let s=seedFrom('65m'); const rnd=()=>{ s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; };
   days.forEach(r=>{
-    const t0=Math.floor(Date.parse(r.datetime+'T09:30:00')/1000);
+    // 端末のタイムゾーンで解釈すると9時間ズレるため、UTCで組み立てる
+    const [yy,mm,dd]=r.datetime.slice(0,10).split('-').map(Number);
+    const t0=Math.floor(Date.UTC(yy,(mm||1)-1,dd||1,9,30)/1000);
     let p=r.open;
     for(let i=0;i<6;i++){
       const open=p;
@@ -669,7 +678,8 @@ function make65FromDaily(rows){
 function colorVolumes(candles,volumes){
   const W=15;   // サージ判定に使う「直近何本の平均か」
   // 先に「年ごとの最高出来高」と「全期間の最高出来高」を調べておく
-  const yearOf=t=> typeof t==='number' ? new Date(t*1000).getFullYear() : +String(t).slice(0,4);
+  // 年の判定もUTC基準にそろえる（端末のタイムゾーンで年末年始がズレるのを防ぐ）
+  const yearOf=t=> typeof t==='number' ? new Date(t*1000).getUTCFullYear() : +String(t).slice(0,4);
   const yearMax={}; let allMax=0;
   volumes.forEach((v,i)=>{
     const y=yearOf(candles[i].time);
@@ -854,12 +864,23 @@ const chart=LightweightCharts.createChart(document.getElementById('chart'),{
 });
 const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
   upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
-candleSeries.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
+paneScale(chart,0,candleSeries).applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
+/* 枠(pane)ごとの価格目盛りを、確実にその枠だけ取る。
+   チャート部品の一部の版に「片方の枠の設定が全部の枠に及ぶ」不具合があり、
+   そのままだと対数目盛りにした時に出来高まで対数になってしまう */
+function paneScale(chartObj, paneIndex, series){
+  try{
+    const p=chartObj.panes()[paneIndex];
+    if(p && typeof p.priceScale==='function'){ const sc=p.priceScale('right'); if(sc) return sc; }
+  }catch(e){}
+  return series.priceScale();     // 取れない場合は従来の方法
+}
+
 // 出来高は価格チャートに重ねず、下の別枠に置く（TradingViewと同じ構成）。
 // 重ねると価格の表示領域が2割ほど食われ、ローソク足が小さく潰れてしまうため
 const volumeSeries=chart.addSeries(LightweightCharts.HistogramSeries,
   {priceFormat:{type:'volume'}, priceScaleId:'right'}, 1);
-volumeSeries.priceScale().applyOptions({scaleMargins:{top:0.10,bottom:0}});
+paneScale(chart,1,volumeSeries).applyOptions({scaleMargins:{top:0.10,bottom:0}});
 // 出来高の移動平均線（出来高と同じ目盛りに重ねる。期間は下のVOL_MA_LENで変えられる）
 const VOL_MA_LEN = 20;
 const volMASeries=chart.addSeries(LightweightCharts.LineSeries,
@@ -883,7 +904,7 @@ let drawingsMap=store.get('mychart-drawings', {});
     if(k.includes('@')) changed=true;
     const arr = drawingsMap[k]||[];
     arr.forEach(d=>{ ['a','b'].forEach(pt=>{
-      if(d[pt] && typeof d[pt].t==='string'){ d[pt].t=Math.floor(Date.parse(d[pt].t+'T00:00:00')/1000); changed=true; }
+      if(d[pt] && typeof d[pt].t==='string'){ d[pt].t=toEpoch(d[pt].t); changed=true; }
     }); });
     out[tick]=(out[tick]||[]).concat(arr);
   });
@@ -906,15 +927,13 @@ function draw(d){
   applyIndicators();            // 自作インジも計算し直す
   // 65分足のときだけ、横軸に時刻も表示する
   chart.applyOptions({ timeScale:{ timeVisible: current.step==='65m', secondsVisible:false } });
-  // 枠の高さ配分：価格を広く、出来高は下に小さく
-  try{
-    const panes=chart.panes();
-    if(panes.length>1){
-      const total=$('chart').clientHeight;
-      panes[0].setHeight(Math.round(total*0.74));
-      panes[1].setHeight(Math.round(total*0.26));
-    }
-  }catch(e){}
+  // 65分足の時刻はUTC(米国市場の時刻)で組み立てているので、表示もUTCに合わせる
+  try{ chart.applyOptions({ localization:{ timeFormatter: current.step==='65m'
+    ? (t)=>{ const dt=new Date(t*1000);
+        return String(dt.getUTCMonth()+1)+'/'+dt.getUTCDate()+' '
+             + String(dt.getUTCHours()).padStart(2,'0')+':'+String(dt.getUTCMinutes()).padStart(2,'0'); }
+    : undefined } }); }catch(e){}
+  layoutPanes();   // 枠の高さを配分（インジの枠が増えても崩れないように）
   // データが長い時は「直近250本」だけ表示して開始（左にスクロールすると過去までさかのぼれる）
   const n=d.candles.length;
   if(n>320) chart.timeScale().setVisibleLogicalRange({from:n-250, to:n+3});
@@ -968,6 +987,27 @@ async function render(){
 }
 
 function fmtVol(n){ return n>=1_000_000 ? (n/1_000_000).toFixed(2)+'M' : (n/1000).toFixed(0)+'K'; }
+/* 枠の高さを配分する。
+   0=価格 / 1=出来高 / 2以降=自作インジ。
+   固定の割合だと、インジの枠が増えた時に入る隙間がなくなって崩れるため、
+   枠の数に応じて配分し直す */
+function layoutPanes(chartObj, el){
+  const c=chartObj||chart, box=el||$('chart');
+  try{
+    const panes=c.panes();
+    if(panes.length<2) return;
+    const total=box.clientHeight;
+    if(!total) return;
+    const indCount=Math.max(0, panes.length-2);          // 自作インジの枠の数
+    const volShare=0.22;
+    const indShare=indCount ? Math.min(0.18, (1-volShare-0.35)/indCount) : 0;
+    const priceShare=1 - volShare - indShare*indCount;
+    panes[0].setHeight(Math.round(total*priceShare));
+    panes[1].setHeight(Math.round(total*volShare));
+    for(let i=2;i<panes.length;i++) panes[i].setHeight(Math.round(total*indShare));
+  }catch(e){}
+}
+
 /* 価格の表示桁数を、その価格帯に合わせて自動で変える。
    低位株を小数2桁で丸めると 0.0234 も 0.0218 も「0.02」になり、
    損切りと利確の区別がつかなくなるため */
@@ -1025,9 +1065,18 @@ function fade(color, alpha){
 const ta = {
   /* 「まだ計算できない(null)」を安全に扱うための小道具 */
   _num(v){ return (v==null || !isFinite(v)) ? null : v; },
+  /* 期間の指定を安全な整数に直す。
+     0や負の数、小数、NaNが来ると計算結果がNaNだらけになり、
+     チャートが崩れて原因も分からなくなるため、入口で守る */
+  _len(n, def){
+    const v=Math.floor(Number(n));
+    if(!isFinite(v) || v<1) return def||1;
+    return Math.min(v, 100000);
+  },
 
   /* 単純移動平均（窓の中が全部そろった時だけ値を出す） */
   sma(src, len){
+    len=ta._len(len,1);
     const out=new Array(src.length).fill(null);
     let sum=0, cnt=0;
     for(let i=0;i<src.length;i++){
@@ -1041,6 +1090,7 @@ const ta = {
   },
   /* 指数移動平均（計算できない所は飛ばして、値が来てから始める） */
   ema(src, len){
+    len=ta._len(len,1);
     const out=new Array(src.length).fill(null); const k=2/(len+1); let prev=null;
     for(let i=0;i<src.length;i++){
       const v=ta._num(src[i]);
@@ -1052,6 +1102,7 @@ const ta = {
   },
   /* 加重移動平均 */
   wma(src, len){
+    len=ta._len(len,1);
     const out=new Array(src.length).fill(null); const denom=len*(len+1)/2;
     for(let i=len-1;i<src.length;i++){
       let sum=0, okAll=true;
@@ -1062,6 +1113,7 @@ const ta = {
   },
   /* Wilder平均（RSIやATRの中で使う） */
   rma(src, len){
+    len=ta._len(len,1);
     const out=new Array(src.length).fill(null); let prev=null;
     for(let i=0;i<src.length;i++){
       const v=ta._num(src[i]);
@@ -1073,6 +1125,7 @@ const ta = {
   },
   /* RSI */
   rsi(src, len){
+    len=ta._len(len,14);
     const n=src.length, gains=new Array(n).fill(0), losses=new Array(n).fill(0);
     for(let i=1;i<n;i++){ const d=src[i]-src[i-1]; gains[i]=Math.max(d,0); losses[i]=Math.max(-d,0); }
     const ag=ta.rma(gains,len), al=ta.rma(losses,len);
@@ -1083,6 +1136,7 @@ const ta = {
   },
   /* 直近len本の最高値・最安値（有効な値が1つも無ければnull） */
   highest(src, len){
+    len=ta._len(len,1);
     const out=new Array(src.length).fill(null);
     for(let i=0;i<src.length;i++){
       let m=-Infinity, any=false;
@@ -1092,6 +1146,7 @@ const ta = {
     return out;
   },
   lowest(src, len){
+    len=ta._len(len,1);
     const out=new Array(src.length).fill(null);
     for(let i=0;i<src.length;i++){
       let m=Infinity, any=false;
@@ -1104,6 +1159,7 @@ const ta = {
   cum(src){ let sum=0; return src.map(v=>{ const n=ta._num(v); if(n!=null) sum+=n; return sum; }); },
   /* n本前との差 */
   change(src, n=1){
+    n=ta._len(n,1);
     return src.map((_,i)=>{
       if(i<n) return null;
       const a=ta._num(src[i]), b=ta._num(src[i-n]);
@@ -1112,6 +1168,7 @@ const ta = {
   },
   /* n本前からの変化率(%) */
   roc(src, len=1){
+    len=ta._len(len,1);
     return src.map((_,i)=>{
       if(i<len) return null;
       const a=ta._num(src[i]), b=ta._num(src[i-len]);
@@ -1120,6 +1177,7 @@ const ta = {
   },
   /* 標準偏差（ボリンジャーバンドの材料） */
   stdev(src, len){
+    len=ta._len(len,1);
     const out=new Array(src.length).fill(null);
     for(let i=len-1;i<src.length;i++){
       let sum=0, cnt=0;
@@ -1134,6 +1192,7 @@ const ta = {
   },
   /* ATR: 1本あたりの実質的な値動き幅の平均（ボラの物差し） */
   atr(high, low, close, len=14){
+    len=ta._len(len,14);
     const tr=high.map((h,i)=>{
       if(i===0) return high[0]-low[0];
       return Math.max(high[i]-low[i], Math.abs(high[i]-close[i-1]), Math.abs(low[i]-close[i-1]));
@@ -1325,6 +1384,7 @@ function applyIndicators(){
   if(customMarkers) customMarkers.setMarkers(markers);
   drawIndShapes();   // 価格帯別出来高などの横棒を描く
   drawIndTable(allTables);   // スコア表を描く
+  layoutPanes();     // インジの枠が増減したので高さを配り直す
   renderChips();   // エラー印も含めて、チップを最新の状態にする
 }
 
@@ -1355,8 +1415,9 @@ function drawIndTable(tables){
 let indShapes=[];
 function drawIndShapes(){
   const svg=$('indOverlay'); if(!svg) return;
-  const w=$('chart').clientWidth, h=$('chart').clientHeight;
-  svg.setAttribute('width',w); svg.setAttribute('height',h);
+  const full=$('chart').clientWidth, h=$('chart').clientHeight;
+  const w=plotAreaWidth();          // 価格ラベルに被らない幅
+  svg.setAttribute('width',full); svg.setAttribute('height',h);
   while(svg.firstChild) svg.removeChild(svg.firstChild);
   indShapes.forEach(sh=>{
     if(sh.type==='bg'){
@@ -1365,7 +1426,9 @@ function drawIndShapes(){
       const paint=(a,b)=>{
         const xa=Lx(a-0.5), xb=Lx(b+0.5);
         if(xa==null||xb==null) return;
-        svg.appendChild(el('rect',{x:Math.min(xa,xb), y:0, width:Math.abs(xb-xa), height:h, fill:sh.color, style:'pointer-events:none'}));
+        // 高さは価格の枠までに留める（出来高の枠まで塗ると見づらいため）
+        svg.appendChild(el('rect',{x:Math.min(xa,xb), y:0, width:Math.abs(xb-xa),
+          height:priceAreaHeight(), fill:sh.color, style:'pointer-events:none'}));
       };
       for(let k=0;k<arr.length;k++){
         if(arr[k] && start<0) start=k;
@@ -1564,7 +1627,13 @@ function yToP(y){ return candleSeries.coordinateToPrice(y); }
    日足の日付でも65分足の時刻でも、全部「秒数」に直して覚える。
    こうすると、どの時間足に切り替えても同じ値段・同じ時間の場所に線が出る */
 let epochs=[];   // いま表示中の各ローソク足の時刻（秒数）一覧
-function toEpoch(t){ return typeof t==='number' ? t : Math.floor(Date.parse(t+'T00:00:00')/1000); }
+function toEpoch(t){
+  if(typeof t==='number') return t;
+  // 日付文字列もUTCで解釈する。端末のタイムゾーンで解釈すると、
+  // 65分足(UTCで組み立て)との間で最大1日ぶんズレてしまう
+  const [y,m,d]=String(t).slice(0,10).split('-').map(Number);
+  return Math.floor(Date.UTC(y,(m||1)-1,d||1)/1000);
+}
 
 // 時刻(秒) → 「何本目か」（小数もあり。データの外側でも延長線上で計算する）
 function tsToLogical(ts){
@@ -1730,7 +1799,7 @@ function layoutOne(d){
     const y=Py(d.price);
     if(y==null){ showParts(parts,false); return; }
     showParts(parts,true);
-    const W=svg.getAttribute('width');
+    const W=plotAreaWidth();
     setPos(parts.hit,{x1:0,y1:y,x2:W,y2:y});
     setPos(parts.vis,{x1:0,y1:y,x2:W,y2:y,'stroke-width':d.width||1.5,'stroke-dasharray':dashOf(d.style)});
     setPos(parts.txt,{y:y-4}); parts.txt.textContent=fmtPrice(d.price);
@@ -1766,7 +1835,7 @@ function layoutOne(d){
     const yE=Py(d.a.p), yT=Py(d.target), yS=Py(d.stop);
     if(x1==null||yE==null||yT==null||yS==null){ showParts(parts,false); return; }
     showParts(parts,true);
-    const x2=+svg.getAttribute('width');   // 右端まで伸ばす
+    const x2=plotAreaWidth();   // 価格ラベルの手前まで伸ばす
     setPos(parts.zoneT,{x:x1, y:Math.min(yE,yT), width:Math.max(0,x2-x1), height:Math.abs(yT-yE)});
     setPos(parts.zoneS,{x:x1, y:Math.min(yE,yS), width:Math.max(0,x2-x1), height:Math.abs(yS-yE)});
     setPos(parts.hitE,{x1, y1:yE, x2, y2:yE}); setPos(parts.visE,{x1, y1:yE, x2, y2:yE, stroke:d.color});
@@ -1900,11 +1969,31 @@ function statsText(a,b){
 }
 // 画面上の位置（クライアント座標）→ チャート左上からのピクセル
 function chartXY(e){ const r=$('chart').getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; }
+/* 価格チャート（上段）の高さ。
+   出来高は下段の別枠になったので、そこをタップして線を作れてしまうと
+   とんでもない価格に線が引かれる。上段の中だけを有効にする */
+/* ローソク足が描かれている領域の幅（右側の価格ラベルの手前まで）。
+   線をチャートの右端まで伸ばすと、価格ラベル(7.43など)の上に被って
+   現在値が読めなくなるため、その手前で止める */
+function plotAreaWidth(){
+  const full=$('chart').clientWidth;
+  try{
+    const w=chart.priceScale('right').width();
+    if(w>0 && w<full) return full-w;
+  }catch(e){}
+  return Math.max(0, full-60);   // 取れない場合の目安
+}
+
+function priceAreaHeight(){
+  try{ const p=chart.panes()[0]; if(p && typeof p.getHeight==='function'){ const h=p.getHeight(); if(h>0) return h; } }catch(e){}
+  return $('chart').clientHeight;
+}
 
 $('catcher').addEventListener('pointerdown', e=>{
   if(!tool) return;
   e.preventDefault(); // チャート側に触れさせない
   const {x,y}=chartXY(e);
+  if(y>priceAreaHeight()){ setFoot('出来高の枠には描けません。上のローソク足の中でどうぞ'); return; }
   const price=yToP(y), t=xToTs(x);
   if(price==null||t==null){ setFoot('チャートの内側をタップしてください'); return; }
 
@@ -2029,6 +2118,10 @@ window.addEventListener('pointermove', e=>{
   if(!drag) return;
   dragMoved=true;              // 実際に動かした
   const p=pos(e);
+  // 出来高の枠まで引っぱると、あり得ない価格に飛んでしまうので上段の中に留める
+  const maxY=priceAreaHeight();
+  if(p.y>maxY) p.y=maxY;
+  if(p.y<0) p.y=0;
   const d=drag.d, o=drag.orig;
   if(d.type==='hline'){ const pr=yToP(p.y); if(pr!=null) d.price=pr; }
   else if(d.type==='arrow'){ // 矢印: そのまま移動
@@ -2171,10 +2264,11 @@ function viewKey(){
   const r=TS().getVisibleLogicalRange();
   const w=$('chart').clientWidth, h=$('chart').clientHeight;
   const py=lastCandle ? Py(lastCandle.close) : 0;   // 縦方向(価格の縮尺)の変化も拾う
-  return (r ? r.from+','+r.to : '-')+','+w+','+h+','+py;
+  const ph=priceAreaHeight();                        // 価格の枠の高さ（インジ追加で変わる）
+  return (r ? r.from+','+r.to : '-')+','+w+','+h+','+py+','+ph;
 }
 (function syncLoop(){
-  if(drawings.length || creating || pendingPoint || indShapes.length){
+  if(drawings.length || creating || pendingPoint || (indShapes && indShapes.length)){
     const k=viewKey();
     if(k!==lastSyncKey){ lastSyncKey=k; layoutOverlay(); drawIndShapes(); }
   }
@@ -2445,7 +2539,8 @@ $('gear').addEventListener('click',()=>{
   });
 });
 
-new ResizeObserver(()=>{ const el=$('chart'); chart.resize(el.clientWidth,el.clientHeight); layoutOverlay(); }).observe($('chart'));
+new ResizeObserver(()=>{ const el=$('chart'); chart.resize(el.clientWidth,el.clientHeight);
+  layoutPanes(); layoutOverlay(); }).observe($('chart'));
 
 /* =========================================================
    2画面表示（TradingView風）
@@ -2468,13 +2563,13 @@ function ensureChart2(){
   });
   candle2=chart2.addSeries(LightweightCharts.CandlestickSeries,{
     upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
-  candle2.priceScale().applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
+  paneScale(chart2,0,candle2).applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
   volume2=chart2.addSeries(LightweightCharts.HistogramSeries,
     {priceFormat:{type:'volume'}, priceScaleId:'right'}, 1);
-  volume2.priceScale().applyOptions({scaleMargins:{top:0.10,bottom:0}});
-  try{ const p2=chart2.panes(); if(p2.length>1){ const h=$('chart2').clientHeight;
-    p2[0].setHeight(Math.round(h*0.74)); p2[1].setHeight(Math.round(h*0.26)); } }catch(e){}
-  new ResizeObserver(()=>{ const el=$('chart2'); chart2.resize(el.clientWidth, el.clientHeight); }).observe($('chart2'));
+  paneScale(chart2,1,volume2).applyOptions({scaleMargins:{top:0.10,bottom:0}});
+  layoutPanes(chart2, $('chart2'));
+  new ResizeObserver(()=>{ const el=$('chart2'); chart2.resize(el.clientWidth, el.clientHeight);
+    layoutPanes(chart2, el); }).observe($('chart2'));
 }
 
 // 2画面目を描画（実データ→ダメならサンプル。時間足はメインと共通）
@@ -2515,10 +2610,7 @@ function setLayout(m){
   $('layoutBtn').textContent = m==='1' ? '1画面' : m==='v' ? '上下' : '左右';
   if(m!=='1'){ ensureChart2(); render2(); }
   // 大きさが変わるので、少し待ってからチャートに新しいサイズを教える
-  setTimeout(()=>{
-    const el=$('chart'); chart.resize(el.clientWidth, el.clientHeight); layoutOverlay();
-    if(chart2){ const e2=$('chart2'); chart2.resize(e2.clientWidth, e2.clientHeight); }
-  }, 60);
+  setTimeout(resizeAll, 60);
 }
 $('layoutBtn').addEventListener('click', ()=>setLayout(layoutMode==='1' ? 'v' : layoutMode==='v' ? 'h' : '1'));
 
@@ -2528,8 +2620,11 @@ $('layoutBtn').addEventListener('click', ()=>setLayout(layoutMode==='1' ? 'v' : 
 let logScale = store.get('mychart-logscale', false);
 function applyScaleMode(){
   const opts={ mode: logScale ? 1 : 0 };   // 1=対数 / 0=普通
-  try{ candleSeries.priceScale().applyOptions(opts); }catch(e){}
-  try{ if(candle2) candle2.priceScale().applyOptions(opts); }catch(e){}
+  try{ paneScale(chart,0,candleSeries).applyOptions(opts); }catch(e){}
+  try{ if(candle2) paneScale(chart2,0,candle2).applyOptions(opts); }catch(e){}
+  // 出来高の枠は必ず「普通の目盛り」に戻す（対数になると棒の高さが読めなくなる）
+  try{ paneScale(chart,1,volumeSeries).applyOptions({mode:0}); }catch(e){}
+  try{ if(volume2) paneScale(chart2,1,volume2).applyOptions({mode:0}); }catch(e){}
   const b=$('scaleBtn');
   if(b){ b.textContent = logScale ? '対数' : '普通'; b.classList.toggle('active', logScale); }
 }
@@ -2542,8 +2637,9 @@ $('scaleBtn').addEventListener('click', ()=>{
 /* チャート最大化（ヘッダー等を隠してチャートを画面いっぱいに） */
 function resizeAll(){
   const el=$('chart'); if(el) chart.resize(el.clientWidth, el.clientHeight);
+  layoutPanes();                      // 枠の高さを新しい大きさに合わせ直す
   layoutOverlay();
-  if(chart2){ const e2=$('chart2'); chart2.resize(e2.clientWidth, e2.clientHeight); }
+  if(chart2){ const e2=$('chart2'); chart2.resize(e2.clientWidth, e2.clientHeight); layoutPanes(chart2, e2); }
 }
 function setMax(on){
   document.body.classList.toggle('max', on);
@@ -2566,6 +2662,8 @@ async function refreshNow(){
     diskSave(d);
   });
   setFoot('最新データを取得中…');
+  // 価格帯別出来高の集計メモも捨てる（同じ本数でも中身が変わっている可能性がある）
+  drawings.forEach(d=>{ if(d._vp) delete d._vp; });
   try{
     await render();
     if(layoutMode!=='1') await render2();
