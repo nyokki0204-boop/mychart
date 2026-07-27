@@ -376,7 +376,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v16 (線が価格ラベルに被る問題を修正)';
+const APP_VERSION='v18 (メモリの使いすぎを修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -606,8 +606,23 @@ function seedFrom(s){ let h=2166136261; for(const c of s){ h^=c.charCodeAt(0); h
 const r2=n=>Math.round(n*100)/100;
 
 /* 銘柄ごとに「約20年ぶんの日足」を1回だけ作ってキャッシュする */
-const dailyCache={};
+/* サンプルデータの保持にも上限を設ける。
+   1銘柄あたり20年分（約690KB）を作るので、上限が無いと
+   監視リストを一周しただけで100MB近く使い、Safariが落ちる */
+const SAMPLE_MAX_SYMBOLS=8;
+const dailyCache={}; let dailyOrder=[];
+function dailyTouch(ticker){
+  dailyOrder=dailyOrder.filter(t=>t!==ticker); dailyOrder.push(ticker);
+  let guard=dailyOrder.length+2;
+  while(dailyOrder.length>SAMPLE_MAX_SYMBOLS && guard-- > 0){
+    const old=dailyOrder.shift();
+    if(old===current.ticker || old===c2.ticker){ dailyOrder.push(old); continue; }
+    delete dailyCache[old];
+    Object.keys(sampleCache).forEach(k=>{ if(k.startsWith(old+'@')) delete sampleCache[k]; });
+  }
+}
 function dailyRowsFor(ticker){
+  dailyTouch(ticker);
   if(dailyCache[ticker]) return dailyCache[ticker];
   const sym=SYMBOLS.find(s=>s.ticker===ticker);
   const base=sym?sym.base:20;
@@ -890,6 +905,8 @@ const volMASeries=chart.addSeries(LightweightCharts.LineSeries,
    ⑤ 状態＆描画（実データ→ダメならサンプル）
    ========================================================= */
 let current={ ticker:store.get('mychart-last', SYMBOLS[0].ticker), step:'1d' };
+// 2画面目の銘柄。キャッシュの整理でも参照するので、ここで先に用意しておく
+let c2 = { ticker: store.get('mychart-c2', 'SOXX') };
 let favs=store.get('mychart-favs', []);
 let lastCandle, lastVol, currentCandles=[], currentVols=[];
 // 描画ツールの状態
@@ -1260,10 +1277,11 @@ function runIndicatorCode(ind){
     const st=step||current.step, key=ticker+'@'+st;
     const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close, volume:0}));
     if(realCache[key]) return toArr(realCache[key]);
-    if(store.get('td-key','') && !htfFetching[key]){
+    if(store.get('td-key','') && !htfFetching[key] && !htfFailed[key]){
       htfFetching[key]=true;
-      loadData(ticker, st).then(()=>{ htfFetching[key]=false; indDataNote=''; applyIndicators(); })
-        .catch(e=>{ htfFetching[key]=false; indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; applyIndicators(); });
+      loadData(ticker, st).then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
+        .catch(e=>{ htfFetching[key]=false; htfFailed[key]=true; trimMap(htfFailed,200);
+          indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; scheduleApplyIndicators(); });
     }
     if(store.get('td-key','')) indSampleFlag=true;
     return toArr(sampleDataset(ticker, st));
@@ -1298,6 +1316,13 @@ function clearCustom(){
   customSeries.forEach(s=>{ try{ chart.removeSeries(s); }catch(e){} });
   customSeries=[];
   if(customMarkers) customMarkers.setMarkers([]);
+  // 自作インジ用の枠(3番目以降)を片付ける。
+  // 消さずに残すと、ON/OFFを繰り返すたびに空の枠が増え続け、
+  // 1枠あたりの高さがどんどん減って画面が固まったようになる
+  try{
+    const panes=chart.panes();
+    for(let i=panes.length-1;i>=2;i--){ try{ chart.removePane(i); }catch(e){} }
+  }catch(e){}
   indShapes=[]; if($('indOverlay')) drawIndShapes();
   if($('indTable')) drawIndTable([]);
 }
@@ -1306,21 +1331,40 @@ function clearCustom(){
 // htf('3M') … 上位足のローソク足を返す（Pineの request.security 相当）
 // 実データがあればそれ、無ければサンプル。実データは裏で取得して届き次第描き直す
 const htfFetching={};
+// 取得に失敗した組み合わせを覚えておく。
+// これが無いと「失敗→再描画→また取得→失敗」を延々と繰り返し、
+// インジを複数出した時に画面が固まる
+const htfFailed={};
+// 記録が増えすぎたら古いものから捨てる（銘柄が多いと際限なく増えるため）
+function trimMap(obj, max){
+  const keys=Object.keys(obj);
+  if(keys.length>max) keys.slice(0, keys.length-max).forEach(k=>delete obj[k]);
+}
 // このインジが「本物でないデータ」を使ったかの印（サンプル混入の警告に使う）
 let indSampleFlag=false, indDataNote='';
 function htf(step){
   const key=current.ticker+'@'+step;
   const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}));
   if(realCache[key]) return toArr(realCache[key]);
-  if(store.get('td-key','') && !htfFetching[key]){
+  if(store.get('td-key','') && !htfFetching[key] && !htfFailed[key]){
     htfFetching[key]=true;
     loadData(current.ticker, step)
-      .then(()=>{ htfFetching[key]=false; indDataNote=''; applyIndicators(); })
-      .catch(e=>{ htfFetching[key]=false; indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; applyIndicators(); });
+      .then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
+      .catch(e=>{ htfFetching[key]=false; htfFailed[key]=true; trimMap(htfFailed,200);   // 一度失敗したら諦める
+        indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; scheduleApplyIndicators(); });
   }
   // APIキーがある＝本物を期待している時だけ「サンプル混入」を警告する
   if(store.get('td-key','')) indSampleFlag=true;
   return toArr(sampleDataset(current.ticker, step));
+}
+
+/* インジの再計算をまとめて行う。
+   上位足や他銘柄の取得が次々に終わるたびに全部を計算し直すと、
+   インジの本数だけ無駄に重くなるため、少し待ってから1回だけ実行する */
+let applyTimer=null;
+function scheduleApplyIndicators(){
+  if(applyTimer) clearTimeout(applyTimer);
+  applyTimer=setTimeout(()=>{ applyTimer=null; applyIndicators(); }, 120);
 }
 
 function applyIndicators(){
@@ -1419,6 +1463,7 @@ function drawIndShapes(){
   const w=plotAreaWidth();          // 価格ラベルに被らない幅
   svg.setAttribute('width',full); svg.setAttribute('height',h);
   while(svg.firstChild) svg.removeChild(svg.firstChild);
+  const hlineList=[];
   indShapes.forEach(sh=>{
     if(sh.type==='bg'){
       // 条件がtrueの足を、縦の帯で塗る（連続する足はまとめて1本の帯に）
@@ -1446,12 +1491,51 @@ function drawIndShapes(){
           height:Math.max(1,Math.abs(y2-y1)-1), fill:b.color, style:'pointer-events:none' }));
       });
     } else if(sh.type==='hline'){
-      const y=candleSeries.priceToCoordinate(sh.price); if(y==null) return;
-      const dash = sh.style==='solid' ? 'none' : sh.style==='dotted' ? '2,5' : '8,5';
-      svg.appendChild(el('line',{x1:0,y1:y,x2:w,y2:y,stroke:sh.color,'stroke-width':sh.width||1.5,'stroke-dasharray':dash,style:'pointer-events:none'}));
-      const t=el('text',{x:6,y:y-4,fill:sh.color,'font-size':10,style:'pointer-events:none'});
-      t.textContent=(sh.text||'')+' '+fmtPrice(sh.price); svg.appendChild(t);
+      hlineList.push(sh);   // まとめて描くので、いったん集めておく
     }
+  });
+  drawGroupedHlines(svg, hlineList, w);
+}
+
+/* 水平線をまとめて描く。
+   例えば7月時点では「前月・前四半期・前半期」の終値がどれも6月末で同じになるため、
+   同じ場所に3本重なってラベルが読めなくなる。
+   同じ価格の線は1本にまとめ、名前を「1M/3M/6M」のように連結して表示する */
+function drawGroupedHlines(svg, list, w){
+  if(!list || !list.length) return;
+  const items=[];
+  list.forEach(sh=>{
+    const y=candleSeries.priceToCoordinate(sh.price);
+    if(y!=null && isFinite(y)) items.push({sh, y});
+  });
+  if(!items.length) return;
+  items.sort((a,b)=>a.y-b.y);
+  // 縦に2px以内のものは「同じ価格」とみなしてまとめる
+  const groups=[];
+  items.forEach(it=>{
+    const g=groups[groups.length-1];
+    if(g && Math.abs(g.y-it.y)<=2) g.items.push(it);
+    else groups.push({y:it.y, items:[it]});
+  });
+  groups.forEach(g=>{
+    // 一番目立つ線（太いもの）を代表にする
+    let rep=g.items[0].sh;
+    g.items.forEach(it=>{ if((it.sh.width||1.5)>(rep.width||1.5)) rep=it.sh; });
+    const dash = rep.style==='solid' ? 'none' : rep.style==='dotted' ? '2,5' : '8,5';
+    svg.appendChild(el('line',{x1:0,y1:g.y,x2:w,y2:g.y,stroke:rep.color,
+      'stroke-width':rep.width||1.5,'stroke-dasharray':dash,style:'pointer-events:none'}));
+    const names=[...new Set(g.items.map(it=>it.sh.text||'').filter(Boolean))];
+    g.label=(names.join('/')+' '+fmtPrice(rep.price)).trim();
+    g.color=rep.color;
+  });
+  // ラベル同士が近すぎる時は、下にずらして重ならないようにする
+  let lastY=-999;
+  groups.forEach(g=>{
+    let ly=g.y-4;
+    if(ly-lastY<12) ly=lastY+12;
+    lastY=ly;
+    const t=el('text',{x:6,y:ly,fill:g.color,'font-size':10,'font-weight':'700',style:'pointer-events:none'});
+    t.textContent=g.label; svg.appendChild(t);
   });
 }
 
@@ -2549,7 +2633,6 @@ new ResizeObserver(()=>{ const el=$('chart'); chart.resize(el.clientWidth,el.cli
    時間足は両方の画面で共通。銘柄はそれぞれ別に選べる
    ========================================================= */
 let layoutMode = store.get('mychart-layout', '1');    // '1'=1画面 'v'=上下 'h'=左右
-let c2 = { ticker: store.get('mychart-c2', 'SOXX') }; // 2画面目の銘柄
 let chart2=null, candle2=null, volume2=null;
 
 // 2画面目のチャートを（初めて必要になった時に）作る
@@ -2655,6 +2738,7 @@ async function refreshNow(){
   const targets=[current.ticker];
   if(layoutMode!=='1' && c2.ticker && !targets.includes(c2.ticker)) targets.push(c2.ticker);
   // メモリと端末の保存から、対象銘柄ぶんだけ削除
+  Object.keys(htfFailed).forEach(k=>delete htfFailed[k]);   // 失敗の記録を消して再挑戦できるように
   targets.forEach(t=>{
     Object.keys(realCache).forEach(k=>{ if(k.startsWith(t+'@')) delete realCache[k]; });
     const d=diskLoad();
