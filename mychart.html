@@ -21,10 +21,14 @@
     display:flex; flex-direction:column; overflow:hidden; }
   .mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums; }
 
-  header { display:flex; align-items:center; gap:8px; padding:10px 14px;
+  header { display:flex; align-items:center; gap:6px; padding:5px 12px; min-width:0;
     background:var(--panel); border-bottom:1px solid var(--line); }
   .sym-btn { display:flex; align-items:center; gap:6px; background:transparent;
-    border:none; color:var(--text); font-size:17px; font-weight:700; letter-spacing:.5px; cursor:pointer; }
+    border:none; color:var(--text); font-size:17px; font-weight:700; letter-spacing:.5px; cursor:pointer;
+    min-width:0; overflow:hidden; }
+  /* 銘柄名が長くても「…」で省略し、右側のボタンを画面外へ押し出さない */
+  .sym-btn #hdrTicker { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sym-btn .caret, .sym-btn .fav { flex:0 0 auto; }
   .sym-btn .caret { color:var(--muted); font-size:12px; }
   .sym-btn .fav { color:var(--star); font-size:14px; }
   .badge { font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; letter-spacing:.5px; }
@@ -36,8 +40,14 @@
     padding:6px 10px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; flex:0 0 auto; }
   .tf button.active { background:var(--accent); color:#fff; }
 
-  .legend { display:flex; flex-wrap:wrap; gap:6px 16px; padding:8px 14px; font-size:13px;
-    border-bottom:1px solid var(--line); }
+  /* 数値(OHLC)はチャートの上に重ねる（TradingViewと同じ方式）。
+     独立した段にすると、iPhoneの狭い画面でチャートが37pxぶん削られてしまうため。
+     pointer-events:none にして、チャートのスクロールや描画の邪魔をしない。
+     ローソク足の上でも読めるよう、文字のふちに背景色の影を付ける */
+  .legend { position:absolute; top:3px; left:10px; max-width:72%; z-index:8;
+    display:flex; flex-wrap:wrap; gap:0 11px; font-size:11px; line-height:1.35;
+    pointer-events:none;
+    text-shadow:0 0 4px var(--bg), 0 0 3px var(--bg), 0 0 2px var(--bg); }
   .legend .item { color:var(--muted); }
   .legend .item b { color:var(--text); font-weight:600; margin-left:4px; }
   .legend .up { color:var(--up); } .legend .down { color:var(--down); }
@@ -60,14 +70,14 @@
   #layoutBtn { margin-left:auto; background:transparent; border:1px solid var(--line); color:var(--muted);
     border-radius:6px; padding:4px 9px; font-size:12px; font-weight:700; cursor:pointer; }
   /* チャート最大化中は、チャート以外の帯を隠す（ツールバーだけ残す） */
-  body.max header, body.max .legend, body.max footer,
+  body.max header, body.max footer, body.max .tools,
   body.max #tfRow, body.max .listTabs { display:none !important; }
   /* 最大化を解除する小さな戻るボタン（最大化中だけ右上に出る） */
   #unmaxBtn { position:fixed; top:8px; right:8px; z-index:30; display:none;
     background:rgba(22,27,36,.9); border:1px solid var(--line); color:var(--text);
     border-radius:6px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer; }
   body.max #unmaxBtn { display:block; }
-  #maxBtn, #refreshBtn { background:transparent; border:1px solid var(--line); color:var(--muted);
+  #maxBtn, #refreshBtn, #penBtn { background:transparent; border:1px solid var(--line); color:var(--muted);
     border-radius:6px; padding:4px 9px; font-size:12px; font-weight:700; cursor:pointer; margin-left:6px; }
   #refreshBtn.busy { opacity:.5; }
   /* z-index（重なり順の番号）が重要：チャート部品は内部で番号を持って前に出るため、
@@ -75,11 +85,15 @@
   #indOverlay { position:absolute; inset:0; pointer-events:none; z-index:4; }
   #overlay { position:absolute; inset:0; pointer-events:none; z-index:5; touch-action:none; }
   #catcher { position:absolute; inset:0; display:none; background:transparent; touch-action:none; cursor:crosshair; z-index:6; }
-  .tools { display:flex; align-items:center; gap:6px; padding:8px 14px; border-bottom:1px solid var(--line); overflow-x:auto; white-space:nowrap; }
+  /* 描画ツールの段は既定で隠す（TradingViewと同じく ✏ ボタンで開閉）。
+     常に出しておくと、iPhoneの狭い画面ではチャートが47pxぶん削られてしまうため */
+  .tools { display:none; align-items:center; gap:6px; padding:5px 12px; border-bottom:1px solid var(--line); overflow-x:auto; white-space:nowrap; }
+  body.tools-open .tools { display:flex; }
+  #penBtn.active { background:var(--accent) !important; color:#fff !important; border-color:var(--accent) !important; }
   .tools button { background:#1c2431; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12px; font-weight:600; cursor:pointer; }
   .tools button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
   .tools input[type=color] { width:30px; height:30px; padding:0; border:1px solid var(--line); border-radius:6px; background:transparent; cursor:pointer; }
-  footer { padding:8px 14px; font-size:11px; color:var(--muted); border-top:1px solid var(--line); min-height:34px; }
+  footer { padding:3px 12px; font-size:10px; color:var(--muted); border-top:1px solid var(--line); min-height:20px; line-height:1.4; }
   footer .err { color:var(--down); }
 
   .backdrop { position:fixed; inset:0; background:rgba(0,0,0,.5); opacity:0; visibility:hidden; transition:opacity .2s; z-index:10; }
@@ -151,7 +165,8 @@
   #indClose, #indCancel { background:#2a3242; color:var(--text); }
   #indNew, #indSave { background:var(--accent); color:#fff; }
   /* チャート左上のインジ名チップ（タップで表示/非表示） */
-  #indChips { position:absolute; top:6px; left:8px; z-index:7; display:flex; flex-wrap:wrap; gap:4px; max-width:72%; align-items:flex-start; }
+  /* 数値の段をチャート上に重ねたので、チップはその下へずらす */
+  #indChips { position:absolute; top:38px; left:8px; z-index:7; display:flex; flex-wrap:wrap; gap:4px; max-width:72%; align-items:flex-start; }
   #indToggleBtn { background:rgba(22,27,36,.88); border:1px solid var(--line); color:var(--muted);
     border-radius:6px; padding:3px 7px; font-size:11px; cursor:pointer; flex:none; }
   #indChips.collapsed .ichip { display:none; }   /* 折りたたみ中はチップ本体を隠す */
@@ -184,13 +199,14 @@
     </button>
     <span class="badge sample" id="badge">サンプル</span>
     <button id="layoutBtn" title="画面の分割を切り替え">1画面</button>
+    <button id="penBtn" title="描画ツールの表示/非表示">✏</button>
     <button id="refreshBtn" title="最新データに更新">⟳</button>
     <button id="maxBtn" title="チャートを最大化">⛶</button>
     <button class="gear" id="gear" title="APIキー設定" style="margin-left:0;">⚙</button>
   </header>
   <button id="unmaxBtn">⛶ 解除</button>
 
-  <div id="tfRow" style="padding:8px 14px; border-bottom:1px solid var(--line);">
+  <div id="tfRow" style="padding:4px 12px; border-bottom:1px solid var(--line);">
     <div class="tf" id="tfButtons">
       <button data-step="65m">65分</button>
       <button data-step="1d" class="active">日足</button>
@@ -219,15 +235,6 @@
     <button id="clearBtn">消去</button>
   </div>
 
-  <div class="legend mono">
-    <span class="item">O<b id="lg-o">-</b></span>
-    <span class="item">H<b id="lg-h">-</b></span>
-    <span class="item">L<b id="lg-l">-</b></span>
-    <span class="item">C<b id="lg-c">-</b></span>
-    <span class="item">前日比<b id="lg-chg">-</b></span>
-    <span class="item">出来高<b id="lg-vol">-</b></span>
-  </div>
-
   <div id="splitWrap" class="split-1">
     <div id="chartWrap">
       <div id="chart"></div>
@@ -235,6 +242,14 @@
       <svg id="overlay"></svg>
       <div id="catcher"></div>
       <div id="indChips"></div>
+      <div class="legend mono">
+        <span class="item">O<b id="lg-o">-</b></span>
+        <span class="item">H<b id="lg-h">-</b></span>
+        <span class="item">L<b id="lg-l">-</b></span>
+        <span class="item">C<b id="lg-c">-</b></span>
+        <span class="item">前日比<b id="lg-chg">-</b></span>
+        <span class="item">出来高<b id="lg-vol">-</b></span>
+      </div>
     <table id="indTable"></table>
     </div>
     <div id="c2pane">
@@ -376,7 +391,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v23 (他銘柄の日付ズレ修正・線のはみ出し修正)';
+const APP_VERSION='v25 (数値をチャート上へ・さらに拡大)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1917,7 +1932,12 @@ function loadDrawings(){
   if(normalizeIds(drawings)) saveDrawings();
   selected=null; hideDelBtn();
 }
-function showDelBtn(){ $('delOneBtn').style.display='inline-block'; $('styleBtn').style.display='inline-block'; }
+function showDelBtn(){
+  $('delOneBtn').style.display='inline-block'; $('styleBtn').style.display='inline-block';
+  // ツールの段を隠している時に線をタップすると「線の設定」「選択を削除」が
+  // 見えない場所に出てしまうので、その時だけ自動で開く
+  try{ if(!toolsOpen) setToolsOpen(true); }catch(e){}
+}
 function hideDelBtn(){ $('delOneBtn').style.display='none'; $('styleBtn').style.display='none'; }
 // 指/マウスの位置を、チャート左上からのピクセルに直す
 function pos(e){ const r=svg.getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; }
@@ -2944,6 +2964,22 @@ async function refreshNow(){
   btn.classList.remove('busy');
 }
 $('refreshBtn').addEventListener('click', refreshNow);
+
+/* 描画ツールの段の開閉。
+   常時表示だと、iPhoneの狭い画面ではチャートが47pxぶん削られてしまう。
+   TradingViewと同じく、ふだんは隠しておいて ✏ を押した時だけ出す。
+   チャートの高さが変わるので、切り替えたら必ずサイズを取り直す */
+let toolsOpen = store.get('mychart-tools-open', false);
+function setToolsOpen(on){
+  toolsOpen=!!on;
+  document.body.classList.toggle('tools-open', toolsOpen);
+  const b=$('penBtn'); if(b) b.classList.toggle('active', toolsOpen);
+  store.set('mychart-tools-open', toolsOpen);
+  if(!toolsOpen && tool) setTool(null);  // 隠す時は描画中のツールを解除しておく
+  setTimeout(resizeAll, 60);
+}
+$('penBtn').addEventListener('click', ()=>setToolsOpen(!toolsOpen));
+setToolsOpen(toolsOpen);
 $('maxBtn').addEventListener('click', ()=>setMax(true));
 $('unmaxBtn').addEventListener('click', ()=>setMax(false));
 // 画面の回転やウィンドウサイズ変更にも自動で合わせる
@@ -2981,7 +3017,8 @@ function swipeTarget(el, target){
   });
 }
 swipeTarget(document.querySelector('header'), 1);
-swipeTarget(document.querySelector('.legend'), 1);
+// 数値(OHLC)はチャート上に重ねた（pointer-events:none）ので、
+// そこでのスワイプは効かない。銘柄切替のスワイプはヘッダーで行う
 swipeTarget($('c2bar'), 2);
 
 // 2画面目の銘柄名をタップ → ウォッチリストから選ぶ（選択先=2画面目）
@@ -3004,7 +3041,7 @@ if(navigator.storage && navigator.storage.persist){
 const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-last',
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
   'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
-  'mychart-logscale'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
+  'mychart-logscale','mychart-tools-open'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
 function buildBackup(includeKey){
