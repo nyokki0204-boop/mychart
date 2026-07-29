@@ -376,7 +376,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v22 (ローソク足を太く・2画面目のサンプル表示を明示)';
+const APP_VERSION='v23 (他銘柄の日付ズレ修正・線のはみ出し修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1355,10 +1355,30 @@ function runIndicatorCode(ind){
   // hline(価格, opt) … 1本の水平線（POC線など）
   const hline =(price,opt)=>plots.push({hline:price, opt:opt||{}});
   // sym('XLK') … 別銘柄のローソク足を返す（Pineの request.security(別銘柄) 相当）
+  /* 他の銘柄のデータを「今のチャートと同じ日付の並び」にそろえる。
+     以前はその銘柄自身の並びをそのまま返していた。本数が1本でも違うと
+     全体が横にズレるため、RS比較（銘柄 vs SPY）が
+     「NVDAの今週」と「SPYの先週」を突き合わせる、といった状態になっていた。
+     取引が無かった日や、上位足を下位足に重ねる時は直前の値を持ち越す。
+     まだデータが無い期間は null（ta側が自動で計算対象から外す） */
+  const alignToChart=(rows)=>{
+    // 相手のデータを時刻順に前から見ていき、各足の時刻を「超えない直近の値」を使う。
+    // 単純な日付一致だと、相手の銘柄にしか無い日（休場日のズレなど）を取りこぼすため、
+    // 両方を時刻順に突き合わせる方式にしている
+    const src=rows.slice().sort((a,b)=>toEpoch(a.time)-toEpoch(b.time));
+    let j=0, last=null;
+    return currentCandles.map(cur=>{
+      const k=toEpoch(cur.time);
+      while(j<src.length && toEpoch(src[j].time)<=k){ last=src[j]; j++; }
+      return last
+        ? { time:cur.time, open:last.open, high:last.high, low:last.low, close:last.close, volume:0 }
+        : { time:cur.time, open:null, high:null, low:null, close:null, volume:0 };
+    });
+  };
   const sym =(ticker,step)=>{
     const st=step||current.step, key=ticker+'@'+st;
     const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close, volume:0}));
-    if(realCache[key]) return toArr(realCache[key]);
+    if(realCache[key]) return alignToChart(toArr(realCache[key]));
     if(!collectingInputs && store.get('td-key','') && !htfFetching[key] && canFetch(key)){
       htfFetching[key]=true;
       loadData(ticker, st).then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
@@ -1366,7 +1386,7 @@ function runIndicatorCode(ind){
           indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; scheduleApplyIndicators(); });
     }
     if(!collectingInputs && store.get('td-key','')) indSampleFlag=true;
-    return toArr(sampleDataset(ticker, st));
+    return alignToChart(toArr(sampleDataset(ticker, st)));
   };
   // table(セル配列) … 右上にスコア表を出す。cells=[{row,col,text,color,bg}...]
   const table =(cells,opt)=>tables.push({cells, opt:opt||{}});
@@ -1557,6 +1577,7 @@ function drawIndShapes(){
   const full=$('chart').clientWidth, h=$('chart').clientHeight;
   const w=plotAreaWidth();          // 価格ラベルに被らない幅
   svg.setAttribute('width',full); svg.setAttribute('height',h);
+  syncClip();                       // 価格の枠の外へはみ出さないようにする
   while(svg.firstChild) svg.removeChild(svg.firstChild);
   const hlineList=[];
   indShapes.forEach(sh=>{
@@ -1912,9 +1933,25 @@ function el(tag, a){ const n=document.createElementNS('http://www.w3.org/2000/sv
    ========================================================= */
 let elMap={};   // 図形ID → その図形の画面部品セット
 
+/* 重ねレイヤーを「価格の枠の中だけ」に切り抜く。
+   priceToCoordinate() は表示範囲の外の価格でも座標を返すため、
+   範囲外の水平線（例: 月足の終値ライン）が下の出来高の枠まで
+   はみ出して描かれ、出来高チャートの上に線とラベルが乗っていた。
+   描画ツールもインジの線も、もともと価格の枠専用なので全体を切り抜いてよい */
+function syncClip(){
+  const total=$('chart').clientHeight, ph=priceAreaHeight();
+  const cut=Math.max(0, Math.round(total-ph));
+  const v='inset(0px 0px '+cut+'px 0px)';
+  [svg, $('indOverlay')].forEach(sv=>{
+    if(!sv || sv.dataset.clip===v) return;
+    sv.style.clipPath=v; sv.style.webkitClipPath=v;
+    sv.dataset.clip=v;
+  });
+}
 function syncSize(){
   const w=$('chart').clientWidth, h=$('chart').clientHeight;
   svg.setAttribute('width',w); svg.setAttribute('height',h);
+  syncClip();
 }
 function setPos(node, attrs){ for(const k in attrs) node.setAttribute(k, attrs[k]); }
 function showParts(parts, on){
