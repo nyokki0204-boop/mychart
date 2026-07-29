@@ -376,7 +376,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v18 (メモリの使いすぎを修正)';
+const APP_VERSION='v22 (ローソク足を太く・2画面目のサンプル表示を明示)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -400,10 +400,31 @@ const store = {
   }
 };
 
+/* 画面に文字を出す時、記号がHTMLとして解釈されないようにする。
+   インジ名やエラー文に " や < が入ると、設定画面や下のバーが崩れるため */
+function escHtml(s){
+  return String(s==null?'':s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 /* エラーが起きたら、下のバーに表示する（今後は画面を見せてもらうだけで原因が分かる） */
 window.addEventListener('error', e=>{
   const f=document.getElementById('foot');
-  if(f) f.innerHTML = '<span class="err">エラー: '+(e.message||'不明なエラー')+'</span>';
+  if(f) f.innerHTML = '<span class="err">エラー: '+escHtml(e.message||'不明なエラー')+'</span>';
+});
+
+/* 非同期処理（データ取得など）の失敗も拾う。
+   これが無いと、取得に失敗しても画面に何も出ず「読み込み中…」のまま黙って止まる。
+   「黙って失敗させない」という、このアプリの方針にそろえる */
+window.addEventListener('unhandledrejection', e=>{
+  const f=document.getElementById('foot'); if(!f) return;
+  const r=e.reason;
+  const msg = (r && r.message) ? r.message
+            : (r && r.kind==='nokey') ? 'APIキーが未設定です'
+            : (r && r.kind) ? String(r.kind)
+            : String(r||'不明なエラー');
+  f.innerHTML = '<span class="err">処理に失敗しました: '+escHtml(msg)+'</span>';
 });
 
 /* URLの「#key=～」からAPIキーを受け取る仕組み
@@ -411,7 +432,9 @@ window.addEventListener('error', e=>{
    （Safariは7日間訪れないサイトの保存データを消すことがあるため、その対策）
    読み取ったらアドレスバーからは消して、肩越しに見られても分からないようにする */
 (function(){
-  const m = location.hash.match(/key=([A-Za-z0-9]+)/);
+  // 英数字だけを拾っていたため、キーに - や _ が含まれていると途中で切れ、
+  // 「間違ったキーが保存され、原因の分かりにくいAPIエラーになる」状態だった
+  const m = location.hash.match(/key=([A-Za-z0-9_\-]+)/);
   if(m){
     store.set('td-key', m[1]);
     history.replaceState(null, '', location.pathname + location.search);
@@ -740,7 +763,11 @@ function sampleDataset(ticker,step){
       → 同じ銘柄の2回目以降はAPIを使わない
    ========================================================= */
 const DISK_KEY='mychart-cache-v1';
-const DISK_MAX=10;                    // 保存する銘柄の数（端末の容量を使いすぎないため）
+/* 端末に残す「枠」の数。数えているのは銘柄数ではなく ticker@時間足 の組み合わせ。
+   同じ銘柄でも日足と65分足を見れば2枠使う（＝実質5銘柄になることがあった）。
+   枠を増やすと保存容量を圧迫するので、代わりに diskPut 側で
+   「期限切れの枠から先に捨てる」ようにして、実際に使える銘柄数を増やしている */
+const DISK_MAX=10;
 const TTL_DAILY=12*3600*1000;         // 日足系は12時間で作り直す
 const TTL_INTRA=15*60*1000;           // 65分足は15分
 
@@ -776,11 +803,24 @@ function diskSave(obj){
 // 生データを端末に保存（圧縮して保存）
 function diskPut(ticker, kind, raw){
   const d=diskLoad();
-  d[ticker+'@'+kind]={ at:Date.now(), z:packRows(raw) };
-  const keys=Object.keys(d);
-  if(keys.length>DISK_MAX){        // 多すぎたら古い順に削除
-    keys.sort((a,b)=>(d[a].at||0)-(d[b].at||0));
-    for(let i=0;i<keys.length-DISK_MAX;i++) delete d[keys[i]];
+  const me=ticker+'@'+kind;
+  d[me]={ at:Date.now(), z:packRows(raw) };
+  if(Object.keys(d).length>DISK_MAX){
+    // ① まず期限切れの枠を捨てる。
+    //    65分足は15分、日足系は12時間で作り直すので、期限切れは残しても使えない。
+    //    これを先に捨てることで、まだ使える日足の枠が押し出されにくくなる
+    const now=Date.now();
+    Object.keys(d).forEach(k=>{
+      if(k===me) return;                                   // 今入れたものは守る
+      const ttl = k.endsWith('@65m') ? TTL_INTRA : TTL_DAILY;
+      if(now-(d[k].at||0) > ttl) delete d[k];
+    });
+    // ② それでも多ければ、古い順に捨てる
+    const keys=Object.keys(d);
+    if(keys.length>DISK_MAX){
+      keys.sort((a,b)=>(d[a].at||0)-(d[b].at||0));
+      for(let i=0;i<keys.length-DISK_MAX;i++) delete d[keys[i]];
+    }
   }
   diskSave(d);
 }
@@ -952,8 +992,9 @@ function draw(d){
     : undefined } }); }catch(e){}
   layoutPanes();   // 枠の高さを配分（インジの枠が増えても崩れないように）
   // データが長い時は「直近250本」だけ表示して開始（左にスクロールすると過去までさかのぼれる）
-  const n=d.candles.length;
-  if(n>320) chart.timeScale().setVisibleLogicalRange({from:n-250, to:n+3});
+  // データが長い時は「画面に収まる本数」だけ表示して開始（左にスクロールすると過去までさかのぼれる）
+  const n=d.candles.length, show=initialBars($('chart'));
+  if(n>show+20) chart.timeScale().setVisibleLogicalRange({from:n-show, to:n+3});
   else chart.timeScale().fitContent();
   lastCandle=d.candles[d.candles.length-1]||null; lastVol=d.vols[d.vols.length-1]||null;
   updateLegend(lastCandle,lastVol);
@@ -963,7 +1004,7 @@ function setMode(mode, msg){
   const b=$('badge');
   if(mode==='real'){ b.textContent='リアル'; b.className='badge real'; $('foot').textContent='Twelve Dataの実データを表示中'; }
   else { b.textContent='サンプル'; b.className='badge sample';
-    $('foot').innerHTML = msg ? `<span class="err">${msg}</span>` : 'サンプル表示中。⚙からAPIキーを入れると実データになります'; }
+    $('foot').innerHTML = msg ? `<span class="err">${escHtml(msg)}</span>` : 'サンプル表示中。⚙からAPIキーを入れると実データになります'; }
 }
 
 /* 描画の順番を守るための番号札。
@@ -1004,6 +1045,17 @@ async function render(){
 }
 
 function fmtVol(n){ return n>=1_000_000 ? (n/1_000_000).toFixed(2)+'M' : (n/1000).toFixed(0)+'K'; }
+
+/* 起動時に表示する本数を、チャートの幅から決める。
+   以前は端末に関係なく常に250本を詰め込んでいたため、iPhoneの幅(約330px)では
+   ローソク1本あたり1.3pxしかなく、実体とヒゲが区別できない細さになっていた。
+   TradingViewのiPhone表示は1本あたり約5pxなので、それに合わせる。
+   BAR_PX を大きくするとローソクが太く（表示本数が減り）、小さくすると細くなる */
+const BAR_PX = 5.5;
+function initialBars(el){
+  const w=(el||$('chart')).clientWidth || 360;
+  return Math.max(30, Math.min(400, Math.round(w / BAR_PX)));
+}
 /* 枠の高さを配分する。
    0=価格 / 1=出来高 / 2以降=自作インジ。
    固定の割合だと、インジの枠が増えた時に入る隙間がなくなって崩れるため、
@@ -1034,6 +1086,10 @@ function priceDigits(p){
   return a>=1 ? 2 : a>=0.1 ? 3 : a>=0.01 ? 4 : 6;
 }
 function fmtPrice(p){ return (p==null||!isFinite(p)) ? '-' : p.toFixed(priceDigits(p)); }
+/* 計算で出した価格を丸める。桁数を固定せず「有効数字8桁」で丸めるのがポイント。
+   以前は小数4桁固定だったため、$0.001の銘柄で損切−7%が−10%に、
+   利確+14%が+10%になり、リスクリワードが2.0のはずが1.0になっていた */
+function roundPrice(p){ return isFinite(p) ? +Number(p).toPrecision(8) : p; }
 /* チャート本体（価格軸・十字線）の精度も銘柄に合わせて変える */
 const MIN_MOVE={2:0.01, 3:0.001, 4:0.0001, 6:0.000001};   // 計算で作ると誤差が出るため表で持つ
 function applyPricePrecision(series, lastClose){
@@ -1140,38 +1196,54 @@ const ta = {
     }
     return out;
   },
-  /* RSI */
+  /* RSI
+     注意：JavaScriptでは null を引き算すると 0 として扱われる。
+     そのため ta.rsi(ta.sma(close,20),14) のような重ねがけをすると、
+     移動平均の「まだ計算できない区間(null)」との差が幻の急騰として記録され、
+     下降中なのにRSIが50付近を指す、という誤りが起きていた。
+     値がそろっていない所は素直に null にして、rma側で飛ばしてもらう */
   rsi(src, len){
     len=ta._len(len,14);
-    const n=src.length, gains=new Array(n).fill(0), losses=new Array(n).fill(0);
-    for(let i=1;i<n;i++){ const d=src[i]-src[i-1]; gains[i]=Math.max(d,0); losses[i]=Math.max(-d,0); }
+    const n=src.length, gains=new Array(n).fill(null), losses=new Array(n).fill(null);
+    for(let i=1;i<n;i++){
+      const a=ta._num(src[i]), b=ta._num(src[i-1]);
+      if(a==null || b==null) continue;          // どちらか欠けていたら計算しない
+      const d=a-b; gains[i]=Math.max(d,0); losses[i]=Math.max(-d,0);
+    }
     const ag=ta.rma(gains,len), al=ta.rma(losses,len);
     return src.map((_,i)=>{
       if(i===0 || ag[i]==null || al[i]==null) return null;
       return al[i]===0 ? 100 : 100 - 100/(1 + ag[i]/al[i]);
     });
   },
-  /* 直近len本の最高値・最安値（有効な値が1つも無ければnull） */
-  highest(src, len){
+  /* 直近len本の最高値・最安値（有効な値が1つも無ければnull）
+     以前は1本ごとに窓の中を全部見直していたため、期間200×2500本で
+     50万回の比較が必要だった。窓から出入りする分だけを更新する方式にして、
+     本数に比例する速さ（約100倍速）にしている */
+  _extreme(src, len, isMax){
     len=ta._len(len,1);
-    const out=new Array(src.length).fill(null);
-    for(let i=0;i<src.length;i++){
-      let m=-Infinity, any=false;
-      for(let j=Math.max(0,i-len+1);j<=i;j++){ const v=ta._num(src[j]); if(v!=null){ any=true; if(v>m)m=v; } }
-      out[i]=any?m:null;
+    const n=src.length, out=new Array(n).fill(null);
+    const dq=new Array(n); let head=0, tail=0;   // 候補の添字を強い順に並べる
+    for(let i=0;i<n;i++){
+      const v=ta._num(src[i]);
+      if(v!=null){
+        // 自分より弱い候補は、もう最大/最小になれないので捨てる
+        while(tail>head){
+          const w=ta._num(src[dq[tail-1]]);
+          if(w==null || (isMax ? w<=v : w>=v)) tail--; else break;
+        }
+        dq[tail++]=i;
+      }
+      while(tail>head && dq[head]<=i-len) head++;   // 窓から出た分を捨てる
+      // 本数がそろうまでは値を出さない（ta.sma と同じ助走の扱いにそろえる）。
+      // 以前は1本目から値を返していたため、例えば「52週高値」がまだ52週ぶんの
+      // データが無い左端でも表示され、sma と食い違っていた
+      out[i]= (i>=len-1 && tail>head) ? ta._num(src[dq[head]]) : null;
     }
     return out;
   },
-  lowest(src, len){
-    len=ta._len(len,1);
-    const out=new Array(src.length).fill(null);
-    for(let i=0;i<src.length;i++){
-      let m=Infinity, any=false;
-      for(let j=Math.max(0,i-len+1);j<=i;j++){ const v=ta._num(src[j]); if(v!=null){ any=true; if(v<m)m=v; } }
-      out[i]=any?m:null;
-    }
-    return out;
-  },
+  highest(src, len){ return ta._extreme(src, len, true); },
+  lowest(src, len){ return ta._extreme(src, len, false); },
   /* 累積合計 */
   cum(src){ let sum=0; return src.map(v=>{ const n=ta._num(v); if(n!=null) sum+=n; return sum; }); },
   /* n本前との差 */
@@ -1210,9 +1282,15 @@ const ta = {
   /* ATR: 1本あたりの実質的な値動き幅の平均（ボラの物差し） */
   atr(high, low, close, len=14){
     len=ta._len(len,14);
-    const tr=high.map((h,i)=>{
-      if(i===0) return high[0]-low[0];
-      return Math.max(high[i]-low[i], Math.abs(high[i]-close[i-1]), Math.abs(low[i]-close[i-1]));
+    // rsiと同じ理由で、null をそのまま計算に混ぜない。
+    // 以前は先頭が null だと 0 という「値動きゼロの足」が出来てしまい、
+    // その後のATRが本来より小さく出ていた
+    const tr=high.map((_,i)=>{
+      const hi=ta._num(high[i]), lo=ta._num(low[i]);
+      if(hi==null || lo==null) return null;
+      const pc = i>0 ? ta._num(close[i-1]) : null;
+      if(pc==null) return hi-lo;                 // 1本目、または前の終値が無い時
+      return Math.max(hi-lo, Math.abs(hi-pc), Math.abs(lo-pc));
     });
     return ta.rma(tr, len);
   },
@@ -1268,7 +1346,11 @@ function runIndicatorCode(ind){
   const plot  =(series,opt)=>plots.push({series, opt:opt||{}});
   const signal=(arr,opt)=>signals.push({arr, opt:opt||{}});
   // hbars(項目) … 価格帯別出来高のような「横棒の集まり」を価格チャートに描く
-  //   項目: [{ priceLow, priceHigh, value, color }...] と { maxValue, poc, widthPct }
+  //   項目: [{ pLow, pHigh, value, color }...] と { maxValue, widthPct }
+  //   ※ pLow/pHigh はその横棒が占める価格の下端・上端。
+  //     長らく説明が priceLow/priceHigh と書かれていたが実装は pLow/pHigh で、
+  //     説明どおりに書くとエラーも出ずに何も描かれなかった。
+  //     今は priceLow/priceHigh と書いても動くようにしてある
   const hbars =(bins,opt)=>plots.push({hbars:bins, opt:opt||{}});
   // hline(価格, opt) … 1本の水平線（POC線など）
   const hline =(price,opt)=>plots.push({hline:price, opt:opt||{}});
@@ -1277,13 +1359,13 @@ function runIndicatorCode(ind){
     const st=step||current.step, key=ticker+'@'+st;
     const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close, volume:0}));
     if(realCache[key]) return toArr(realCache[key]);
-    if(store.get('td-key','') && !htfFetching[key] && !htfFailed[key]){
+    if(!collectingInputs && store.get('td-key','') && !htfFetching[key] && canFetch(key)){
       htfFetching[key]=true;
       loadData(ticker, st).then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
-        .catch(e=>{ htfFetching[key]=false; htfFailed[key]=true; trimMap(htfFailed,200);
+        .catch(e=>{ htfFetching[key]=false; htfFailed[key]=Date.now(); trimMap(htfFailed,200);
           indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; scheduleApplyIndicators(); });
     }
-    if(store.get('td-key','')) indSampleFlag=true;
+    if(!collectingInputs && store.get('td-key','')) indSampleFlag=true;
     return toArr(sampleDataset(ticker, st));
   };
   // table(セル配列) … 右上にスコア表を出す。cells=[{row,col,text,color,bg}...]
@@ -1334,7 +1416,16 @@ const htfFetching={};
 // 取得に失敗した組み合わせを覚えておく。
 // これが無いと「失敗→再描画→また取得→失敗」を延々と繰り返し、
 // インジを複数出した時に画面が固まる
+/* 取得に失敗した組み合わせと、その時刻。
+   永久に諦めると、例えばXLK(セクターETF)が一度失敗しただけで
+   UT-ScreenのRS判定が全銘柄でサンプルのままになってしまう。
+   かといって即座に再挑戦すると無限ループになるので、少し時間をおいて再挑戦する */
 const htfFailed={};
+const RETRY_AFTER=60000;   // 1分たてば再挑戦
+function canFetch(key){
+  const t=htfFailed[key];
+  return !t || (Date.now()-t) > RETRY_AFTER;
+}
 // 記録が増えすぎたら古いものから捨てる（銘柄が多いと際限なく増えるため）
 function trimMap(obj, max){
   const keys=Object.keys(obj);
@@ -1342,19 +1433,23 @@ function trimMap(obj, max){
 }
 // このインジが「本物でないデータ」を使ったかの印（サンプル混入の警告に使う）
 let indSampleFlag=false, indDataNote='';
+/* ⚙設定画面は「コードの中の input() を集める」ためだけにインジを1回実行する。
+   その実行で htf()/sym() が本物のデータを取りに行くと、設定を覗いただけで
+   APIの回数を消費してしまうため、この間だけ取得を止める */
+let collectingInputs=false;
 function htf(step){
   const key=current.ticker+'@'+step;
   const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}));
   if(realCache[key]) return toArr(realCache[key]);
-  if(store.get('td-key','') && !htfFetching[key] && !htfFailed[key]){
+  if(!collectingInputs && store.get('td-key','') && !htfFetching[key] && canFetch(key)){
     htfFetching[key]=true;
     loadData(current.ticker, step)
       .then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
-      .catch(e=>{ htfFetching[key]=false; htfFailed[key]=true; trimMap(htfFailed,200);   // 一度失敗したら諦める
+      .catch(e=>{ htfFetching[key]=false; htfFailed[key]=Date.now(); trimMap(htfFailed,200);   // しばらく置いて再挑戦
         indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; scheduleApplyIndicators(); });
   }
   // APIキーがある＝本物を期待している時だけ「サンプル混入」を警告する
-  if(store.get('td-key','')) indSampleFlag=true;
+  if(!collectingInputs && store.get('td-key','')) indSampleFlag=true;
   return toArr(sampleDataset(current.ticker, step));
 }
 
@@ -1484,7 +1579,10 @@ function drawIndShapes(){
     if(sh.type==='hbars'){
       const maxV=sh.maxValue||1, maxW=w*(sh.widthPct||0.35);
       sh.bins.forEach(b=>{
-        const y1=candleSeries.priceToCoordinate(b.pHigh), y2=candleSeries.priceToCoordinate(b.pLow);
+        // pHigh/pLow が本来の名前。priceHigh/priceLow と書かれていても受け付ける
+        const bHi = b.pHigh!=null ? b.pHigh : b.priceHigh;
+        const bLo = b.pLow !=null ? b.pLow  : b.priceLow;
+        const y1=candleSeries.priceToCoordinate(bHi), y2=candleSeries.priceToCoordinate(bLo);
         if(y1==null||y2==null) return;
         const bw=(b.value/maxV)*maxW;
         svg.appendChild(el('rect',{ x:w-bw, y:Math.min(y1,y2), width:Math.max(0,bw),
@@ -1563,7 +1661,7 @@ function renderChips(){
     c.className='ichip'+(ind.on?'':' off')+(ind._err?' err':'')+((ind._sample&&ind.on)?' warn':'');
     if(ind._err) c.title=ind._err;
     else if(ind._sample) c.title='上位足/他銘柄が実データでないため、サンプルで計算しています'+(indDataNote?('：'+indDataNote):'');
-    c.innerHTML=`<span>${ind.name}</span>${(ind._sample&&ind.on)?'<span class="g">⚠</span>':''}<span class="g" data-g="1">⚙</span>`;
+    c.innerHTML=`<span>${escHtml(ind.name)}</span>${(ind._sample&&ind.on)?'<span class="g">⚠</span>':''}<span class="g" data-g="1">⚙</span>`;
     c.addEventListener('click', e=>{
       if(e.target.dataset.g){ openIndSettings(ind); return; }   // ⚙=設定
       ind.on=!ind.on; saveInds(); applyIndicators();            // 名前タップ=ON/OFF
@@ -1577,7 +1675,9 @@ let settingsId=null;
 function openIndSettings(ind){
   settingsId=ind.id;
   let inputs=[];
+  collectingInputs=true;   // この実行ではAPIを使わない
   try{ inputs = runIndicatorCode(ind).inputs || []; }catch(e){ inputs=[]; }
+  finally{ collectingInputs=false; }
   $('indParamTitle').textContent = ind.name + ' の設定';
   const box=$('indParamFields'); box.innerHTML='';
   if(!inputs.length){
@@ -1589,16 +1689,17 @@ function openIndSettings(ind){
     const row=document.createElement('div'); row.className='dsRow';
     if(inp.isToggle){
       // 表示ON/OFFのチェックボックス
-      row.innerHTML=`<label>${inp.name}</label>`
+      row.innerHTML=`<label>${escHtml(inp.name)}</label>`
         + `<input type="checkbox" data-i="${idx}" data-toggle="1" ${cur?'checked':''} style="flex:none; width:22px; height:22px;" />`;
       box.appendChild(row); return;
     }
     const isNum=(typeof inp.def==='number');
     const isColor=(typeof cur==='string' && /^#[0-9a-fA-F]{3,8}$/.test(cur));
-    row.innerHTML=`<label>${inp.name}</label>`
+    // 名前・値をそのまま埋めると、" や < を含む時に設定画面が崩れる
+    row.innerHTML=`<label>${escHtml(inp.name)}</label>`
       + (isColor
-        ? `<input type="color" data-i="${idx}" value="${cur}" />`
-        : `<input type="${isNum?'number':'text'}" class="pfield" data-i="${idx}" value="${cur}" />`);
+        ? `<input type="color" data-i="${idx}" value="${escHtml(cur)}" />`
+        : `<input type="${isNum?'number':'text'}" class="pfield" data-i="${idx}" value="${escHtml(cur)}" />`);
     box.appendChild(row);
   });
   box._inputs=inputs;
@@ -1624,7 +1725,13 @@ $('ipSave').addEventListener('click', ()=>{
     $('indParamFields').querySelectorAll('[data-i]').forEach(f=>{
       const inp=inputs[+f.dataset.i]; if(!inp) return;
       if(f.dataset.toggle){ ind.params[inp.name] = f.checked; }   // チェックボックス=ON/OFF
-      else ind.params[inp.name] = (typeof inp.def==='number') ? Number(f.value) : f.value;
+      else if(typeof inp.def==='number'){
+        // 欄を空にして保存すると 0 になり、期間0のような無理な設定が入ってしまう。
+        // 空欄・数値でない時は、そのインジの初期値に戻す
+        const v=Number(f.value);
+        ind.params[inp.name] = (String(f.value).trim()==='' || !isFinite(v)) ? inp.def : v;
+      }
+      else ind.params[inp.name] = f.value;
     });
     saveInds(); applyIndicators();
   }
@@ -1747,11 +1854,29 @@ function pushUndo(){
   try{ undoStack.push(JSON.stringify(drawings.map(d=>{ const c={...d}; delete c._vp; return c; }))); }catch(e){ return; }
   if(undoStack.length>20) undoStack.shift();
 }
+/* 描画の通し番号(id)を、必ず「銘柄の中で重複しない」状態に直す。
+   旧バージョンは線を「銘柄@時間足」ごとに保存していて、それぞれ id が 1 から
+   振られていた。今の版はこれを銘柄ごとに統合するが、振り直しをしていなかったため
+   同じ id の線が複数でき、次の3つが同時に起きていた：
+     ・部品の対応表(elMap)が上書きされ、線が表示されない
+     ・タップしても常に最初の1本が選ばれる（他は選べない）
+     ・「選択を削除」で同じidの線がまとめて消える
+   戻り値 true = 直した（呼び出し側で保存する） */
+function normalizeIds(list){
+  const seen=new Set(); let repaired=false;
+  list.forEach(d=>{
+    if(!d.id || seen.has(d.id)){ d.id=uid++; repaired=true; }
+    seen.add(d.id);
+    uid=Math.max(uid, d.id+1);
+  });
+  return repaired;
+}
+
 function doUndo(){
   if(!undoStack.length){ setFoot('戻せる操作がありません'); return; }
   try{
     drawings=JSON.parse(undoStack.pop());
-    drawings.forEach(d=>{ if(!d.id) d.id=uid++; uid=Math.max(uid, d.id+1); });
+    normalizeIds(drawings);
     selected=null; hideDelBtn(); saveDrawings(); redrawOverlay();
     setFoot('元に戻しました（残り'+undoStack.length+'手）');
   }catch(e){ setFoot('戻せませんでした'); }
@@ -1767,7 +1892,8 @@ function saveDrawings(){
 function loadDrawings(){
   undoStack=[];               // 銘柄が変わったら履歴もリセット
   drawings = drawingsMap[dKey()] || [];
-  drawings.forEach(d=>{ if(!d.id) d.id=uid++; uid=Math.max(uid, d.id+1); });
+  // 重複を見つけたら振り直し、その場で保存して二度と起きないようにする
+  if(normalizeIds(drawings)) saveDrawings();
   selected=null; hideDelBtn();
 }
 function showDelBtn(){ $('delOneBtn').style.display='inline-block'; $('styleBtn').style.display='inline-block'; }
@@ -2097,7 +2223,7 @@ $('catcher').addEventListener('pointerdown', e=>{
   if(tool==='pos'){
     // 損益ツール: タップした価格をエントリーとして、利確+14%/損切-7%の箱を作る
     creating={ id:0, type:'pos', color:drawColor, a:{t, p:price},
-               target:+(price*1.14).toFixed(4), stop:+(price*0.93).toFixed(4) };
+               target:roundPrice(price*1.14), stop:roundPrice(price*0.93) };
     createStart={x,y}; createMoved=false;
     setFoot('離すと確定（利確+14% / 損切-7%。後で端をドラッグして調整できます）');
     redrawOverlay(); return;
@@ -2133,7 +2259,7 @@ window.addEventListener('pointermove', e=>{
     const t2=xToTs(x), pr=yToP(y);
     if(t2!=null&&pr!=null){
       creating.a={t:t2, p:pr};
-      if(creating.type==='pos'){ creating.target=+(pr*1.14).toFixed(4); creating.stop=+(pr*0.93).toFixed(4); }
+      if(creating.type==='pos'){ creating.target=roundPrice(pr*1.14); creating.stop=roundPrice(pr*0.93); }
     }
   } else {
     const t=xToTs(x), pr=yToP(y);
@@ -2302,10 +2428,14 @@ function clearDrawings(){ drawings=[]; drag=null; pendingPoint=null; pendingPoly
 // ドラッグ開始時にも履歴を残す（動かす前の位置に戻せるように）
 
 /* 「線の設定」…選択中の線の色・太さ・線種を変える */
+// 開いた時に表示していた太さ。既定(1.5)は選択肢に無く「2」と表示されるため、
+// 触っていないのにOKを押すだけで線が太くなっていた。変更された時だけ反映する
+let dsShownWidth=null;
 function openDrawingStyle(){
   const d=drawings.find(x=>x.id===selected); if(!d) return;
   $('dsColor').value = d.color || '#f5c518';
-  $('dsWidth').value = String(Math.min(4, Math.max(1, Math.round(d.width || 2))));
+  dsShownWidth = String(Math.min(4, Math.max(1, Math.round(d.width || 1.5))));
+  $('dsWidth').value = dsShownWidth;
   $('dsStyle').value = d.style || 'solid';
   $('dsBack').classList.add('open');
 }
@@ -2315,7 +2445,8 @@ $('dsOk').addEventListener('click', ()=>{
   if(d){
     pushUndo();
     d.color=$('dsColor').value;
-    d.width=Number($('dsWidth').value);
+    const w=$('dsWidth').value;
+    if(w!==dsShownWidth) d.width=Number(w);   // 触っていなければ、もとの太さのまま
     d.style=$('dsStyle').value;
     saveDrawings();
     redrawOverlay();   // 色は部品を作る時に決まるので、作り直して反映
@@ -2402,6 +2533,7 @@ $('modalCancel').addEventListener('click',()=>{ $('modalBack').classList.remove(
    以前は未取得の銘柄ごとに20年分の架空データを作っていて、
    銘柄が増えるとウォッチリストを開くたびに数秒固まっていた */
 const PRICES_KEY='mychart-prices';
+const PRICES_MAX=400;          // 覚えておく銘柄数の上限（ウォッチリスト全体より十分多め）
 let pricesMem=null;
 function pricesLoad(){
   if(pricesMem) return pricesMem;
@@ -2414,6 +2546,13 @@ function priceRemember(ticker, candles){
   if(!prev.close) return;
   const p=pricesLoad();
   p[ticker]={ p:last.close, c:(last.close-prev.close)/prev.close*100, at:Date.now() };
+  // 上限を設ける（設計ルール③）。1件50バイト程度なので余裕はあるが、
+  // 銘柄を入れ替え続けると古い銘柄のメモが際限なく残り続けるため
+  const keys=Object.keys(p);
+  if(keys.length>PRICES_MAX){
+    keys.sort((a,b)=>(p[a].at||0)-(p[b].at||0));
+    for(let i=0;i<keys.length-PRICES_MAX;i++) delete p[keys[i]];
+  }
   try{ localStorage.setItem(PRICES_KEY, JSON.stringify(p)); }catch(e){}
 }
 // 価格を返す。分からない場合は null（架空の数字は出さない）
@@ -2653,6 +2792,9 @@ function ensureChart2(){
   layoutPanes(chart2, $('chart2'));
   new ResizeObserver(()=>{ const el=$('chart2'); chart2.resize(el.clientWidth, el.clientHeight);
     layoutPanes(chart2, el); }).observe($('chart2'));
+  // 途中で2画面に切り替えた時、2画面目だけ「普通の目盛り」のままになっていたので、
+  // 作った直後に今の設定（対数/普通）をそろえる
+  try{ applyScaleMode(); }catch(e){}
 }
 
 // 2画面目を描画（実データ→ダメならサンプル。時間足はメインと共通）
@@ -2663,21 +2805,28 @@ async function render2(){
   store.set('mychart-c2', c2.ticker);
   const my=++render2Token;
   const t2=c2.ticker, cacheKey=t2+'@'+current.step;
-  let d=realCache[cacheKey];
+  // 取得できたのが「実データ」か「サンプル」かを必ず持ち回る。
+  // 以前は失敗を黙って握りつぶしてサンプルに差し替えていたため、
+  // 2画面目に架空の価格が本物の顔で表示されていた
+  let d=realCache[cacheKey], isReal=!!d, failMsg='';
   if(!d && store.get('td-key','')){
-    try{ d=await loadData(t2, current.step); }catch(e){}
+    try{ d=await loadData(t2, current.step); isReal=true; }
+    catch(e){ failMsg = (e && e.kind==='api') ? ('APIエラー: '+(e.message||'')) : '取得できず'; }
     if(my!==render2Token) return;            // 古い応答は捨てる
   }
-  if(d) priceRemember(t2, d.candles);
-  if(!d) d=sampleDataset(t2, current.step);
+  if(isReal && d) priceRemember(t2, d.candles);
+  if(!d){ d=sampleDataset(t2, current.step); isReal=false; }
   if(d.candles.length) applyPricePrecision(candle2, d.candles[d.candles.length-1].close);
   candle2.setData(d.candles); volume2.setData(d.vols);
   chart2.applyOptions({ timeScale:{ timeVisible: current.step==='65m', secondsVisible:false } });
-  const n2=d.candles.length;
-  if(n2>320) chart2.timeScale().setVisibleLogicalRange({from:n2-250, to:n2+3});
+  const n2=d.candles.length, show2=initialBars($('chart2'));
+  if(n2>show2+20) chart2.timeScale().setVisibleLogicalRange({from:n2-show2, to:n2+3});
   else chart2.timeScale().fitContent();
   const last=d.candles[d.candles.length-1], prev=d.candles[d.candles.length-2];
-  if(last && prev && prev.close){
+  if(!isReal){
+    // 架空の数字は出さない（メイン画面の「サンプル」バッジと同じ考え方）
+    $('c2price').innerHTML='<span class="err">サンプル'+(failMsg?'／'+escHtml(failMsg):'')+'</span>';
+  } else if(last && prev && prev.close){
     const chg=(last.close-prev.close)/prev.close*100;
     $('c2price').textContent=fmtPrice(last.close)+' ('+(chg>=0?'+':'')+chg.toFixed(2)+'%)';
   } else {
@@ -2817,7 +2966,8 @@ if(navigator.storage && navigator.storage.persist){
 // アプリが使っている保存キー一覧（バックアップの対象）
 const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-last',
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
-  'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices'];
+  'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
+  'mychart-logscale'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
 function buildBackup(includeKey){
