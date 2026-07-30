@@ -170,6 +170,15 @@
   #indToggleBtn { background:rgba(22,27,36,.88); border:1px solid var(--line); color:var(--muted);
     border-radius:6px; padding:3px 7px; font-size:11px; cursor:pointer; flex:none; }
   #indChips.collapsed .ichip { display:none; }
+  /* 読み込み中の覆い。
+     銘柄を切り替えるとヘッダーの名前は即座に変わるが、チャートは
+     データが届くまで前の銘柄のまま。API上限で最大60秒待つことがあるため、
+     その間「別の銘柄のチャートを新しい銘柄だと思って読む」危険がある。
+     覆ってしまえば読み間違えようがない（タップも通さない） */
+  #staleNote { position:absolute; inset:0; z-index:9; display:none;
+    align-items:center; justify-content:center; text-align:center; white-space:pre-line;
+    background:rgba(14,17,23,.80); color:var(--ema); font-size:13px; line-height:1.7; padding:0 22px; }
+  body.loading #staleNote { display:flex; }
   .ichip .ival { font-variant-numeric:tabular-nums; font-weight:700; margin-left:5px; }   /* 十字線の位置のインジ値 */
   /* スコア表（インジのtable()が右上に出す） */
   #indTable { position:absolute; top:6px; right:8px; z-index:7; border-collapse:collapse;
@@ -244,6 +253,7 @@
       <svg id="overlay"></svg>
       <div id="catcher"></div>
       <div id="indChips"></div>
+      <div id="staleNote"></div>
       <div class="legend mono">
         <span class="item">O<b id="lg-o">-</b></span>
         <span class="item">H<b id="lg-h">-</b></span>
@@ -393,7 +403,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v30 (API上限の記録を保存・エラー原因を正直に表示)';
+const APP_VERSION='v31 (読み込み中の誤読防止)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1256,6 +1266,13 @@ function setMode(mode, msg){
     $('foot').innerHTML = msg ? `<span class="err">${escHtml(msg)}</span>` : 'サンプル表示中。⚙からAPIキーを入れると実データになります'; }
 }
 
+/* 読み込み中の覆いを出す/消す */
+function setLoading(on, msg){
+  document.body.classList.toggle('loading', !!on);
+  const el=$('staleNote');
+  if(el && on) el.textContent=msg||'読み込み中…';
+}
+
 /* 描画の順番を守るための番号札。
    スワイプで素早く銘柄を変えた時、遅れて届いた古い応答で
    画面が上書きされる（銘柄名と中身がズレる）のを防ぐ */
@@ -1269,6 +1286,7 @@ async function render(){
   store.set('mychart-last', ticker);
 
   if(realCache[cacheKey]){
+    setLoading(false);
     draw(realCache[cacheKey]); setMode('real');
     priceRemember(ticker, realCache[cacheKey].candles);
     return;
@@ -1276,6 +1294,8 @@ async function render(){
 
   if(store.get('td-key','')){
     $('foot').textContent='読み込み中…';
+    // 待っている間、前の銘柄のチャートを新しい銘柄だと誤読しないよう覆う
+    setLoading(true, ticker+' を読み込み中…\n（表示中のチャートはまだ前の銘柄です）');
     try{
       const d=await loadData(ticker, step);
       if(my!==renderToken) return;           // ← 古い応答は捨てる（最新の表示を壊さない）
@@ -1293,8 +1313,14 @@ async function render(){
       else if(err.kind==='nokey') setMode('sample');   // キー未設定はエラーではない
       else if(err && err.message) setMode('sample','取得に失敗しました: '+err.message+'（サンプル表示）');
       else                        setMode('sample','取得に失敗しました（通信状況をご確認ください）→ サンプル表示');
+    }finally{
+      // 覆いは必ず外す。
+      // 途中で return する経路（古い応答の破棄）があるので finally に置く。
+      // 自分が最新でない時は、新しい呼び出しが覆いを管理しているので触らない
+      if(my===renderToken) setLoading(false);
     }
   } else {
+    setLoading(false);
     draw(sampleDataset(ticker, step)); setMode('sample');
   }
 }
