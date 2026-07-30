@@ -413,7 +413,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v35 (保存データを即表示し、裏で最新に差し替え)';
+const APP_VERSION='v36 (タップで描画の値が変わるバグを修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2831,10 +2831,21 @@ svg.addEventListener('touchstart', e=>{
 }, {passive:false});
 // move/upは svg ではなく window で監視する
 // → setPointerCapture が失敗しても、指がどこに動いてもドラッグを追跡できる
+/* 指が少し揺れただけでは動かさない。
+   iPhoneでは「タップ」でも必ず1〜3pxは動くため、しきい値が無いと
+   線を選ぼうとしただけでドラッグ扱いになり、マグネット(14px)が働いて
+   その時間足のOHLCへ勝手に吸着してしまう。
+   結果、日足で引いた線を週足でタップしただけで値段が書き換わり、
+   「時間足ごとに値段がズレる」ように見えていた */
+const DRAG_MIN_PX = 7;
 window.addEventListener('pointermove', e=>{
   if(!drag) return;
-  dragMoved=true;              // 実際に動かした
   const p=pos(e);
+  if(!dragMoved){
+    const dx=p.x-drag.start.x, dy=p.y-drag.start.y;
+    if(Math.sqrt(dx*dx+dy*dy) < DRAG_MIN_PX) return;   // まだタップの範囲。何も変えない
+    dragMoved=true;                                     // ここから本当のドラッグ
+  }
   // 出来高の枠まで引っぱると、あり得ない価格に飛んでしまうので上段の中に留める
   const maxY=priceAreaHeight();
   if(p.y>maxY) p.y=maxY;
