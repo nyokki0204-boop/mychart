@@ -169,7 +169,8 @@
   #indChips { position:absolute; top:38px; left:8px; z-index:7; display:flex; flex-wrap:wrap; gap:4px; max-width:72%; align-items:flex-start; }
   #indToggleBtn { background:rgba(22,27,36,.88); border:1px solid var(--line); color:var(--muted);
     border-radius:6px; padding:3px 7px; font-size:11px; cursor:pointer; flex:none; }
-  #indChips.collapsed .ichip { display:none; }   /* 折りたたみ中はチップ本体を隠す */
+  #indChips.collapsed .ichip { display:none; }
+  .ichip .ival { font-variant-numeric:tabular-nums; font-weight:700; margin-left:5px; }   /* 十字線の位置のインジ値 */
   /* スコア表（インジのtable()が右上に出す） */
   #indTable { position:absolute; top:6px; right:8px; z-index:7; border-collapse:collapse;
     font-size:10px; background:rgba(14,17,23,.9); border:1px solid var(--line); display:none; }
@@ -229,6 +230,7 @@
     <button data-tool="pos">± 損益</button>
     <button data-tool="vp">▤ 出来高P</button>
     <input type="color" id="colorPick" value="#f5c518" title="線の色" />
+    <button id="magnetBtn" title="高値・安値に吸い付かせる">🧲 吸着</button>
     <button id="undoBtn" title="元に戻す">↶ 戻す</button>
     <button id="styleBtn" style="display:none;">線の設定</button>
     <button id="delOneBtn" style="display:none; border-color:#ef5350; color:#ef5350;">選択を削除</button>
@@ -391,7 +393,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v25 (数値をチャート上へ・さらに拡大)';
+const APP_VERSION='v30 (API上限の記録を保存・エラー原因を正直に表示)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -585,19 +587,39 @@ function symInfo(t){ return SYMBOLS.find(s=>s.ticker===t) || { ticker:t, name:'�
 /* APIの流量制御：無料枠は「1分あたり8回」。
    これを超えると失敗するので、超えそうな時は自動で少し待ってから投げる。
    （銘柄をスワイプで次々変えた時に上限に当たるのを防ぐ） */
-const API_LIMIT=8, API_WINDOW=60000;
-let apiTimes=[], apiChain=Promise.resolve();
+/* 上限は「1分8回」だが7回で止める。
+   端末とサーバの時計が少しずれていると、8回目がサーバ側では
+   前の1分に入って9回目と数えられることがあるため、1回ぶん余裕を持たせる */
+const API_LIMIT=7, API_WINDOW=60000;
+const API_TIMES_KEY='mychart-api-times';
+
+/* 使用時刻は端末に保存する。
+   これまではメモリ上の変数だけだったため、ページを開き直すと記録が
+   空に戻り、サーバ側にはまだ8回ぶん残っているのに「余裕がある」と
+   判断して投げ続け、弾かれ続けていた。
+   版を差し替えて読み込み直す使い方だと、これが必ず起きる */
+function apiTimesLoad(){
+  const v=store.get(API_TIMES_KEY, []);
+  if(!Array.isArray(v)) return [];
+  const now=Date.now();
+  return v.filter(t=>typeof t==='number' && now-t<API_WINDOW && t<=now);
+}
+function apiTimesSave(a){ store.set(API_TIMES_KEY, a); }
+
+let apiChain=Promise.resolve();
 function apiGate(){
   apiChain = apiChain.then(async ()=>{
-    let now=Date.now();
-    apiTimes=apiTimes.filter(t=>now-t<API_WINDOW);
-    if(apiTimes.length>=API_LIMIT){
-      const wait=API_WINDOW-(now-apiTimes[0])+150;
-      setFoot('API上限（1分8回）のため '+Math.ceil(wait/1000)+'秒待機中…');
-      await new Promise(r=>setTimeout(r, wait));
-      apiTimes=apiTimes.filter(t=>Date.now()-t<API_WINDOW);
+    let times=apiTimesLoad();
+    if(times.length>=API_LIMIT){
+      const wait=API_WINDOW-(Date.now()-times[0])+250;
+      if(wait>0){
+        setFoot('API上限（1分'+API_LIMIT+'回）のため '+Math.ceil(wait/1000)+'秒待機中…');
+        await new Promise(r=>setTimeout(r, wait));
+      }
+      times=apiTimesLoad();
     }
-    apiTimes.push(Date.now());
+    times.push(Date.now());
+    apiTimesSave(times);
   });
   return apiChain;
 }
@@ -611,21 +633,81 @@ function isSaneRow(v){
   return true;
 }
 
+/* 1日のAPI回数を数える。無料枠は1日800回。
+   これまでは数えていなかったため、使い切ると理由が分からないまま
+   全部サンプル表示に落ちていた。あくまで端末側で数えた「おおよその目安」
+   （サーバ側の実際の残り回数とは多少ずれる） */
+const API_DAY_LIMIT=800;
+function apiDayKey(){
+  const d=new Date();   // 日付の判定はUTC基準（設計ルール①）
+  return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');
+}
+function apiCount(){
+  const v=store.get('mychart-api-count', null);
+  return (v && v.d===apiDayKey()) ? v : { d:apiDayKey(), n:0 };
+}
+function apiBump(){
+  const c=apiCount(); c.n++; store.set('mychart-api-count', c);
+  const left=API_DAY_LIMIT-c.n;
+  if(left===100 || left===30 || left===0){
+    setFoot(left>0 ? ('APIの残りが約'+left+'回です（1日800回）')
+                   : '本日のAPI回数を使い切りました。日付が変わると回復します');
+  }
+  return c.n;
+}
+
+/* Twelve Dataのエラー文は英語なので、よくあるものを日本語にする。
+   「You have run out of API credits...」のまま出しても、
+   何をすればよいのか分からないため */
+function apiErrJa(msg){
+  const m=String(msg||'');
+  if(/run out of API credits|api credits/i.test(m)){
+    return /day|daily/i.test(m)
+      ? '本日のAPI回数（1日800回）を使い切りました。日付が変わると回復します'
+      : 'API回数（1分8回）を超えました。少し待つと回復します';
+  }
+  if(/not found|does not exist|invalid symbol|symbol.*invalid/i.test(m)) return '銘柄が見つかりません（ティッカーをご確認ください）';
+  if(/api ?key|unauthorized|forbidden|authentic/i.test(m)) return 'APIキーが正しくないようです（⚙から入れ直してください）';
+  if(/plan|upgrade|grow|pro\b/i.test(m)) return 'この銘柄・時間足は無料プランでは取得できないようです';
+  return m;
+}
+
 async function fetchReal(symbol, step){
   const key = store.get('td-key','');
   if(!key) throw { kind:'nokey' };
   await apiGate();   // 上限に当たらないよう順番待ち
+  apiBump();         // 1日の使用回数を1つ進める
   const tf = TF[step];
   const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}`
             + `&interval=${tf.api}&outputsize=${tf.size}&apikey=${key}`;
   const res = await fetch(url);
-  const json = await res.json();
-  if(json.status === 'error' || !json.values) throw { kind:'api', message: json.message || '取得失敗' };
+  // HTTPの状態を確認していなかったため、エラーページ(HTML)が返ってきた時に
+  // 「JSONが読めない」という分かりにくい例外になり、通信エラー扱いされていた
+  if(!res.ok){
+    throw { kind:'api', message:
+      res.status===429 ? 'API回数の上限に達しました。少し待ってからお試しください'
+      : res.status>=500 ? ('Twelve Data側で一時的な不具合が起きているようです（'+res.status+'）')
+      : ('取得に失敗しました（HTTP '+res.status+'）') };
+  }
+  let json;
+  try{ json = await res.json(); }
+  catch(e){ throw { kind:'api', message:'応答を読み取れませんでした（通信が不安定かもしれません）' }; }
+  if(json.status === 'error' || !json.values) throw { kind:'api', message: apiErrJa(json.message || '取得失敗') };
   // Twelve Dataは「新しい順」で返すので、古い順に並べ替える
   // 受け取った1本1本を検証し、壊れている足は捨てる。
   // （日付が無い・価格が数値でない等をそのまま通すと、
   //   チャートが崩れたり、移動平均が全部NaNになって以降の足まで汚染される）
-  const rows = json.values.slice().reverse().filter(isSaneRow);
+  let rows = json.values.slice().reverse().filter(isSaneRow);
+  // 同じ時刻の足が二重に来ることがある。そのまま通すと、線の位置を計算する
+  // tsToLogical() が「間隔ゼロ」で割り算をして Infinity になり、
+  // 描いた線が異常な位置へ飛ぶ。ここで新しい方だけを残す
+  const seen=new Set(); const uniq=[];
+  for(let i=rows.length-1;i>=0;i--){
+    const key=String(rows[i].datetime);
+    if(seen.has(key)) continue;
+    seen.add(key); uniq.push(rows[i]);
+  }
+  rows = uniq.reverse();
   if(!rows.length) throw { kind:'api', message:'有効なデータがありません（銘柄名をご確認ください）' };
   if(tf.agg==='65') return to65(rows);              // 65分足に束ねる
   if(tf.agg)        return toMonths(rows, tf.agg);  // 3ヶ月/6ヶ月足に束ねる
@@ -733,12 +815,17 @@ function colorVolumes(candles,volumes){
   // 先に「年ごとの最高出来高」と「全期間の最高出来高」を調べておく
   // 年の判定もUTC基準にそろえる（端末のタイムゾーンで年末年始がズレるのを防ぐ）
   const yearOf=t=> typeof t==='number' ? new Date(t*1000).getUTCFullYear() : +String(t).slice(0,4);
-  const yearMax={}; let allMax=0;
+  const yearMax={}, yearCount={}; let allMax=0;
   volumes.forEach((v,i)=>{
     const y=yearOf(candles[i].time);
+    yearCount[y]=(yearCount[y]||0)+1;
     if(!(y in yearMax) || v.value>yearMax[y]) yearMax[y]=v.value;
     if(v.value>allMax) allMax=v.value;
   });
+  // 「その年の最高」は、1年に十分な本数がある時だけ意味がある。
+  // 3ヶ月足(年4本)・6ヶ月足(年2本)だと25〜50%が白くなり、
+  // 強調のはずが単なる模様になっていたため、年12本未満では付けない
+  const YEAR_MIN=12;
   return volumes.map((v,i)=>{
     const sl=volumes.slice(Math.max(0,i-W),i);
     const avg=sl.length?sl.reduce((a,b)=>a+b.value,0)/sl.length:v.value;
@@ -747,7 +834,7 @@ function colorVolumes(candles,volumes){
     // 色の優先順位: 全期間最高 > その年の最高 > 2倍サージ > 通常
     let color;
     if(v.value===allMax && allMax>0)           color='#e040fb';   // 紫: 読み込んだ全期間での最高
-    else if(v.value===yearMax[y] && v.value>0) color='#ffffff';   // 白: その年の最高(今年=年初来高出来高)
+    else if(v.value===yearMax[y] && v.value>0 && yearCount[y]>=YEAR_MIN) color='#ffffff';   // 白: その年の最高(今年=年初来高出来高)
     else if(v.value>=avg*2)                    color='#f5a623';   // アンバー: 平均の2倍サージ
     else color = up ? 'rgba(38,166,154,0.45)' : 'rgba(239,83,80,0.45)';
     return {time:v.time, value:v.value, color};
@@ -779,10 +866,13 @@ function sampleDataset(ticker,step){
    ========================================================= */
 const DISK_KEY='mychart-cache-v1';
 /* 端末に残す「枠」の数。数えているのは銘柄数ではなく ticker@時間足 の組み合わせ。
-   同じ銘柄でも日足と65分足を見れば2枠使う（＝実質5銘柄になることがあった）。
-   枠を増やすと保存容量を圧迫するので、代わりに diskPut 側で
-   「期限切れの枠から先に捨てる」ようにして、実際に使える銘柄数を増やしている */
-const DISK_MAX=10;
+   同じ銘柄でも日足と65分足を見れば2枠使う。
+   IndexedDBに移したことで容量の制約が外れたため、10枠 → 120枠に増やした。
+   （日足1銘柄で約150KB。120枠でも20MB弱で、IndexedDBの容量には十分収まる）
+   LS_MAX は、IndexedDBが使えない環境で localStorage に落ちた時の上限。
+   こちらは容量が5MBしかないので従来どおり控えめにする */
+const DISK_MAX=120;
+const LS_MAX=10;
 const TTL_DAILY=12*3600*1000;         // 日足系は12時間で作り直す
 const TTL_INTRA=15*60*1000;           // 65分足は15分
 
@@ -794,19 +884,106 @@ function packRows(raw){
            v:raw.volumes.map(x=>x.value) };
 }
 function unpackRows(z){
-  if(!z || !z.t) return null;
+  // 列が1つでも欠けていたら使わない。
+  // 以前は t の有無だけ見ていたため、o/h/l/c/v が欠けた保存を読むと
+  // z.o[i] で例外になり、チャート全体が表示できなくなる可能性があった
+  if(!z || !Array.isArray(z.t)) return null;
+  for(const key of ['o','h','l','c','v']){
+    if(!Array.isArray(z[key]) || z[key].length!==z.t.length) return null;
+  }
   return { candles:z.t.map((t,i)=>({time:t, open:z.o[i], high:z.h[i], low:z.l[i], close:z.c[i]})),
            volumes:z.t.map((t,i)=>({time:t, value:z.v[i]})) };
 }
 
-/* 端末の保存は「一度読んだらメモリに持っておく」
-   （毎回JSONを解析すると、時間足を切り替えるたびに画面が引っかかるため）*/
-function diskLoad(){
+/* ---- 端末保存：IndexedDB（容量が桁違いに大きい） ----
+   これまでは localStorage に入れていたが、容量が約5MBしかなく、
+   日足1銘柄で150KBほど使うため10枠しか置けなかった。
+   ウォッチリストが160銘柄あるので、見直すたびにAPIを使い直していた。
+   IndexedDBに移すことで枠を120に増やし、1日800回のAPI消費を大きく減らす。
+
+   Safariのプライベートブラウズなどで IndexedDB が使えない環境もあるため、
+   その時は従来の localStorage 方式に自動で戻る（動かなくならないように） */
+const IDB_NAME='mychart', IDB_STORE='bars';
+const IDX_KEY='mychart-cache-idx';    // 「どの枠がいつ保存されたか」だけの軽い目録
+let idbPromise=null, idbBroken=false;
+
+function idbOpen(){
+  if(idbBroken) return Promise.resolve(null);
+  if(idbPromise) return idbPromise;
+  idbPromise=new Promise(resolve=>{
+    let done=false;
+    const fail=()=>{ if(!done){ done=true; idbBroken=true; resolve(null); } };
+    try{
+      if(!window.indexedDB) return fail();
+      const req=indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded=()=>{ try{
+        const db=req.result;
+        if(!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      }catch(e){} };
+      req.onsuccess=()=>{ if(!done){ done=true; resolve(req.result); } };
+      req.onerror=fail; req.onblocked=fail;
+      setTimeout(fail, 4000);      // 応答が返らない時は諦めて従来方式へ
+    }catch(e){ fail(); }
+  });
+  return idbPromise;
+}
+// IndexedDBの読み書きは、失敗しても必ず null / false で返る形にそろえる
+function idbRun(mode, fn){
+  return idbOpen().then(db=>{
+    if(!db) return null;
+    return new Promise(resolve=>{
+      try{
+        const tx=db.transaction(IDB_STORE, mode), st=tx.objectStore(IDB_STORE);
+        const r=fn(st);
+        tx.oncomplete=()=>resolve(r ? r.result : true);
+        tx.onerror=()=>resolve(null); tx.onabort=()=>resolve(null);
+      }catch(e){ resolve(null); }
+    });
+  }).catch(()=>null);
+}
+const idbGet  = k     => idbRun('readonly',  st=>st.get(k));
+const idbSet  = (k,v) => idbRun('readwrite', st=>{ st.put(v,k); return null; }).then(r=>r!==null);
+const idbDel  = k     => idbRun('readwrite', st=>{ st.delete(k); return null; });
+const idbKeys = ()    => idbRun('readonly',  st=>st.getAllKeys());
+
+function idxLoad(){ const v=store.get(IDX_KEY, {}); return (v && typeof v==='object') ? v : {}; }
+
+/* 保存・整理は「必ず1件ずつ順番に」行う。
+   同時に走らせると、目録(IDX_KEY)の読み→書きが競合して記録が消え、
+   目録に載っていない枠が「一番古いもの」と誤判定されて、
+   いま保存したばかりの銘柄が整理で消される、という不具合が起きた */
+let idbChain=Promise.resolve();
+function idbQueue(fn){
+  idbChain = idbChain.then(fn).catch(()=>{});
+  return idbChain;
+}
+
+/* 枠が増えすぎたら整理する（設計ルール③：キャッシュには必ず上限）。
+   ①期限切れを先に捨てる ②それでも多ければ古い順 という順番は従来と同じ */
+async function idbPrune(){
+  const keys=await idbKeys();
+  if(!keys || keys.length<=DISK_MAX) return;
+  const idx=idxLoad(), now=Date.now(), alive=[];
+  for(const k of keys){
+    const at=idx[k]||0;
+    const ttl=String(k).endsWith('@65m') ? TTL_INTRA : TTL_DAILY;
+    if(now-at>ttl){ await idbDel(k); delete idx[k]; }
+    else alive.push(k);
+  }
+  if(alive.length>DISK_MAX){
+    alive.sort((a,b)=>(idx[a]||0)-(idx[b]||0));
+    for(let i=0;i<alive.length-DISK_MAX;i++){ await idbDel(alive[i]); delete idx[alive[i]]; }
+  }
+  store.set(IDX_KEY, idx);
+}
+
+/* ---- 従来の localStorage 方式（IndexedDBが使えない時の受け皿 兼 引っ越し元） ---- */
+function lsLoad(){
   if(diskMem) return diskMem;
   try{ diskMem=JSON.parse(localStorage.getItem(DISK_KEY)||'{}'); }catch(e){ diskMem={}; }
   return diskMem;
 }
-function diskSave(obj){
+function lsSave(obj){
   diskMem=obj;
   try{ localStorage.setItem(DISK_KEY, JSON.stringify(obj)); }
   catch(e){   // 容量オーバー時は古いものから捨てて再挑戦
@@ -815,37 +992,91 @@ function diskSave(obj){
     try{ localStorage.setItem(DISK_KEY, JSON.stringify(obj)); }catch(e2){}
   }
 }
-// 生データを端末に保存（圧縮して保存）
-function diskPut(ticker, kind, raw){
-  const d=diskLoad();
-  const me=ticker+'@'+kind;
-  d[me]={ at:Date.now(), z:packRows(raw) };
-  if(Object.keys(d).length>DISK_MAX){
-    // ① まず期限切れの枠を捨てる。
-    //    65分足は15分、日足系は12時間で作り直すので、期限切れは残しても使えない。
-    //    これを先に捨てることで、まだ使える日足の枠が押し出されにくくなる
+function lsPutRec(k, rec){
+  const d=lsLoad();
+  d[k]=rec;
+  if(Object.keys(d).length>LS_MAX){
     const now=Date.now();
-    Object.keys(d).forEach(k=>{
-      if(k===me) return;                                   // 今入れたものは守る
-      const ttl = k.endsWith('@65m') ? TTL_INTRA : TTL_DAILY;
-      if(now-(d[k].at||0) > ttl) delete d[k];
+    Object.keys(d).forEach(x=>{
+      if(x===k) return;
+      const ttl = x.endsWith('@65m') ? TTL_INTRA : TTL_DAILY;
+      if(now-(d[x].at||0) > ttl) delete d[x];
     });
-    // ② それでも多ければ、古い順に捨てる
     const keys=Object.keys(d);
-    if(keys.length>DISK_MAX){
+    if(keys.length>LS_MAX){
       keys.sort((a,b)=>(d[a].at||0)-(d[b].at||0));
-      for(let i=0;i<keys.length-DISK_MAX;i++) delete d[keys[i]];
+      for(let i=0;i<keys.length-LS_MAX;i++) delete d[keys[i]];
     }
   }
-  diskSave(d);
+  lsSave(d);
 }
-// 端末の保存から取り出す（古すぎるものは無効）
-function diskGet(ticker, kind){
-  const d=diskLoad(), e=d[ticker+'@'+kind];
-  if(!e) return null;
-  const ttl = kind==='65m' ? TTL_INTRA : TTL_DAILY;
-  if(Date.now()-(e.at||0) > ttl) return null;
-  return e.z ? unpackRows(e.z) : (e.raw||null);   // 旧形式もそのまま読める
+
+/* localStorage に残っている古い保存を、一度だけ IndexedDB へ引っ越す */
+let migrated=false;
+async function idbMigrate(){
+  if(migrated) return; migrated=true;
+  try{
+    const old=lsLoad(), keys=Object.keys(old);
+    if(!keys.length) return;
+    const idx=idxLoad();
+    let moved=0;
+    for(const k of keys){ if(await idbSet(k, old[k])){ idx[k]=old[k].at||Date.now(); moved++; } }
+    if(moved){
+      store.set(IDX_KEY, idx);
+      try{ localStorage.removeItem(DISK_KEY); }catch(e){}
+      diskMem={};
+    }
+  }catch(e){}
+}
+
+/* ---- 外から使うのはこの2つ（どちらの方式かは中で吸収する） ---- */
+function diskPut(ticker, kind, raw){
+  const k=ticker+'@'+kind, rec={ at:Date.now(), z:packRows(raw) };
+  return idbQueue(async ()=>{
+    await idbMigrate();
+    if(await idbSet(k, rec)){
+      const idx=idxLoad(); idx[k]=rec.at;
+      // 目録にも上限を設ける（設計ルール③）。
+      // Safariが保存領域を勝手に消すと、実体の無い記録だけが残り続けるため
+      const ik=Object.keys(idx);
+      if(ik.length>DISK_MAX*3){
+        ik.sort((a,b)=>(idx[a]||0)-(idx[b]||0));
+        for(let n=0;n<ik.length-DISK_MAX*3;n++) delete idx[ik[n]];
+      }
+      store.set(IDX_KEY, idx);
+      await idbPrune();
+    }else{
+      lsPutRec(k, rec);               // IndexedDBが使えない環境
+    }
+  });
+}
+async function diskGet(ticker, kind){
+  // 保存が壊れていても、チャートを止めずに「保存なし」として扱う。
+  // ここで例外が外へ出ると、取得の失敗として扱われてサンプル表示に落ちてしまう
+  try{
+    const k=ticker+'@'+kind;
+    await idbMigrate();
+    const rec = (await idbGet(k)) || lsLoad()[k];   // 引っ越し前のデータも読める
+    if(!rec) return null;
+    const ttl = kind==='65m' ? TTL_INTRA : TTL_DAILY;
+    if(Date.now()-(rec.at||0) > ttl) return null;
+    return rec.z ? unpackRows(rec.z) : (rec.raw||null);   // 旧形式もそのまま読める
+  }catch(e){ return null; }
+}
+/* 指定した銘柄の保存を消す（「今すぐ最新に」で使う） */
+function diskDropTicker(ticker){
+  const pre=ticker+'@';
+  return idbQueue(async ()=>{
+    const keys=await idbKeys();
+    if(keys){
+      const idx=idxLoad();
+      for(const k of keys){ if(String(k).startsWith(pre)){ await idbDel(k); delete idx[k]; } }
+      store.set(IDX_KEY, idx);
+    }
+    const d=lsLoad(); let hit=false;
+    Object.keys(d).forEach(k=>{ if(k.startsWith(pre)){ delete d[k]; hit=true; } });
+    if(hit) lsSave(d);
+  });
 }
 
 /* 日足の生データから、他の時間足を自分で作る（APIを使わない） */
@@ -887,14 +1118,14 @@ async function loadData(ticker, step){
   if(realCache[memKey]) return realCache[memKey];
 
   if(step==='65m'){
-    let raw=diskGet(ticker,'65m');
+    let raw=await diskGet(ticker,'65m');
     if(!raw){ raw=await fetchReal(ticker,'65m'); diskPut(ticker,'65m',raw); }
     return realCache[memKey]=pack(raw);
   }
   // 日足を用意（端末の保存 → 無ければAPIで1回だけ取得）
   let daily=realCache[ticker+'@__daily'];
   if(!daily){
-    daily=diskGet(ticker,'1d');
+    daily=await diskGet(ticker,'1d');
     if(!daily){ daily=await fetchReal(ticker,'1d'); diskPut(ticker,'1d',daily); }
     realCache[ticker+'@__daily']=daily;
   }
@@ -932,8 +1163,11 @@ const chart=LightweightCharts.createChart(document.getElementById('chart'),{
   crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
   rightPriceScale:{borderColor:'#232a36'}, timeScale:{borderColor:'#232a36'},
 });
+// 枠線あり。ローソクを太くした(v22)ことで、輪郭が付いた方が
+// TradingViewに近い見え方になり、実体とヒゲの境目も読みやすい
 const candleSeries=chart.addSeries(LightweightCharts.CandlestickSeries,{
-  upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
+  upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',
+  borderVisible:true, borderUpColor:'#26a69a', borderDownColor:'#ef5350'});
 paneScale(chart,0,candleSeries).applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
 /* 枠(pane)ごとの価格目盛りを、確実にその枠だけ取る。
    チャート部品の一部の版に「片方の枠の設定が全部の枠に及ぶ」不具合があり、
@@ -1051,15 +1285,32 @@ async function render(){
     }catch(err){
       if(my!==renderToken) return;
       draw(sampleDataset(ticker, step));
-      if(err.kind==='api') setMode('sample','APIエラー: '+err.message+'（サンプル表示）');
-      else setMode('sample','取得できず（通信/CORS）→ サンプル表示');
+      // 原因を決めつけない。
+      // 以前は何が起きても「通信できませんでした（電波の状況をご確認ください）」と
+      // 断定して赤字で出していたため、本当の原因（API上限など）が分からず、
+      // 画面を見ても何を直せばよいか判断できなかった
+      if(err.kind==='api')        setMode('sample','APIエラー: '+err.message+'（サンプル表示）');
+      else if(err.kind==='nokey') setMode('sample');   // キー未設定はエラーではない
+      else if(err && err.message) setMode('sample','取得に失敗しました: '+err.message+'（サンプル表示）');
+      else                        setMode('sample','取得に失敗しました（通信状況をご確認ください）→ サンプル表示');
     }
   } else {
     draw(sampleDataset(ticker, step)); setMode('sample');
   }
 }
 
-function fmtVol(n){ return n>=1_000_000 ? (n/1_000_000).toFixed(2)+'M' : (n/1000).toFixed(0)+'K'; }
+/* 出来高の表示。以前は24億が「2436.26M」と4桁のMになって読みづらく、
+   インジの値表示(fmtIndVal)が「2.44B」なのと食い違っていた。
+   0が「0K」、999,999が「1000K」になる点も直す */
+function fmtVol(n){
+  if(n==null || !isFinite(n)) return '-';
+  const a=Math.abs(n);
+  if(a===0) return '0';
+  if(a>=1e9) return (n/1e9).toFixed(2)+'B';
+  if(a>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(a>=1000) return (n/1000).toFixed(1)+'K';
+  return String(Math.round(n));
+}
 
 /* 起動時に表示する本数を、チャートの幅から決める。
    以前は端末に関係なく常に250本を詰め込んでいたため、iPhoneの幅(約330px)では
@@ -1123,6 +1374,7 @@ function updateLegend(c,v){
   const base = (prev && prev.close) ? prev.close : c.open;
   const chg=(c.close-base)/base*100, el=$('lg-chg');
   el.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%'; el.className=chg>=0?'up':'down';
+  updateIndValues(i);   // インジの値も、同じ足のものに合わせる
 }
 chart.subscribeCrosshairMove(p=>{
   if(!p.time){ updateLegend(lastCandle,lastVol); return; }
@@ -1510,6 +1762,9 @@ function applyIndicators(){
     try{
       indSampleFlag=false;   // このインジの計算前にリセット
       const {plots, signals, tables, bgs}=runIndicatorCode(ind);
+      // 十字線を合わせた足の値を読めるように、線の中身を覚えておく
+      // （TradingViewが銘柄名の横にインジの数値を出しているのと同じ考え方）
+      ind._vals = plots.filter(p=>p.series).map(p=>({ color:p.opt.color||'#00bcd4', arr:p.series }));
       if(indSampleFlag) ind._sample=true; else delete ind._sample;
       if(tables && tables.length) allTables.push(...tables);
       if(bgs && bgs.length) bgs.forEach(b=>indShapes.push({type:'bg', arr:b.arr, color:b.opt.color||'rgba(156,39,176,0.18)'}));
@@ -1549,7 +1804,7 @@ function applyIndicators(){
       delete ind._err;   // 正常に動いたのでエラー印を消す
     }catch(e){
       // コードに間違いがあっても止まらず、印を付けて下のバーに理由を出す
-      ind._err=e.message;
+      ind._err=e.message; delete ind._vals;
       setFoot('インジ「'+ind.name+'」でエラー: '+e.message);
     }
   });
@@ -1675,9 +1930,32 @@ function drawGroupedHlines(svg, list, w){
 
 /* ---- チャート左上のチップ（名前タップ=表示/非表示、⚙=設定） ---- */
 let chipsCollapsed = store.get('mychart-chips-collapsed', false);
+/* 十字線の位置にあるインジの値を表示するための入れ物。
+   TradingViewは銘柄名の横にインジの数値を並べるが、これまでは名前しか出ず、
+   「今この線はいくつなのか」がチャートを目で追うしかなかった */
+let chipValEls=[];
+function fmtIndVal(v){
+  if(v==null || !isFinite(v)) return '–';
+  const a=Math.abs(v);
+  if(a===0) return '0';
+  // 出来高系は桁が大きく、そのまま出すと10桁になってチップからはみ出すため
+  if(a>=1e9) return (v/1e9).toFixed(2)+'B';
+  if(a>=1e6) return (v/1e6).toFixed(2)+'M';
+  if(a>=1000) return v.toFixed(0);
+  if(a>=1)    return v.toFixed(2);
+  if(a>=0.01) return v.toFixed(3);
+  return v.toFixed(5);
+}
+function updateIndValues(i){
+  chipValEls.forEach(o=>{
+    const v = (i!=null && i>=0 && i<o.arr.length) ? o.arr[i] : null;
+    o.el.textContent = fmtIndVal(v);
+  });
+}
 function renderChips(){
   const box=$('indChips'); if(!box) return;
   box.innerHTML='';
+  chipValEls=[];
   box.classList.toggle('collapsed', chipsCollapsed);
   // 先頭の開閉ボタン（インジが1つも無い時は何も出さない）
   if(indicators.length){
@@ -1698,6 +1976,15 @@ function renderChips(){
     if(ind._err) c.title=ind._err;
     else if(ind._sample) c.title='上位足/他銘柄が実データでないため、サンプルで計算しています'+(indDataNote?('：'+indDataNote):'');
     c.innerHTML=`<span>${escHtml(ind.name)}</span>${(ind._sample&&ind.on)?'<span class="g">⚠</span>':''}<span class="g" data-g="1">⚙</span>`;
+    // 十字線を合わせた足の値を出す欄（ONで線があるインジだけ）
+    if(ind.on && ind._vals && ind._vals.length){
+      ind._vals.forEach(v=>{
+        const sp=document.createElement('span');
+        sp.className='ival'; sp.style.color=v.color; sp.textContent='–';
+        c.appendChild(sp);
+        chipValEls.push({ el:sp, arr:v.arr });
+      });
+    }
     c.addEventListener('click', e=>{
       if(e.target.dataset.g){ openIndSettings(ind); return; }   // ⚙=設定
       ind.on=!ind.on; saveInds(); applyIndicators();            // 名前タップ=ON/OFF
@@ -1850,6 +2137,28 @@ function Py(p){ return candleSeries.priceToCoordinate(p); }
 function xToL(x){ return TS().coordinateToLogical(x); }
 function yToP(y){ return candleSeries.coordinateToPrice(y); }
 
+/* マグネット吸着：指の近くにローソク足の高値・安値・始値・終値があれば、
+   そこにピタッと合わせる。
+   iPhoneは指が太く、狙った値ちょうどを掴むのが難しい。節目のブレイクを
+   見る手法だと、数ピクセルのズレがそのまま判断のズレになるため。
+   MAGNET_PX 以内に何も無ければ、指の位置の値をそのまま使う */
+let magnetOn = store.get('mychart-magnet', true);
+const MAGNET_PX = 14;
+function snapPrice(x, y){
+  const raw=yToP(y);
+  if(!magnetOn || raw==null || !currentCandles.length) return raw;
+  const l=xToL(x); if(l==null) return raw;
+  const i=Math.max(0, Math.min(currentCandles.length-1, Math.round(l)));
+  const c=currentCandles[i]; if(!c) return raw;
+  let best=null, bestD=MAGNET_PX;
+  [c.high, c.low, c.open, c.close].forEach(p=>{
+    const py=Py(p); if(py==null) return;
+    const d=Math.abs(py-y);
+    if(d<bestD){ bestD=d; best=p; }
+  });
+  return best!=null ? best : raw;
+}
+
 /* --- 線を「世界共通の時刻（エポック秒）」で覚えるための変換 ---
    日足の日付でも65分足の時刻でも、全部「秒数」に直して覚える。
    こうすると、どの時間足に切り替えても同じ値段・同じ時間の場所に線が出る */
@@ -1863,13 +2172,17 @@ function toEpoch(t){
 }
 
 // 時刻(秒) → 「何本目か」（小数もあり。データの外側でも延長線上で計算する）
+/* 足の間隔がゼロだと割り算が Infinity になる。
+   取得側で重複は除いているが、二重の保険としてここでも守る
+   （Infinity を返すと、線が画面外へ飛んだり描画が壊れるため） */
+function safeDiv(num, den){ return den ? num/den : 0; }
 function tsToLogical(ts){
   const e=epochs, n=e.length-1; if(n<1) return null;
-  if(ts<=e[0]) return (ts-e[0])/(e[1]-e[0]);
-  if(ts>=e[n]) return n+(ts-e[n])/(e[n]-e[n-1]);
+  if(ts<=e[0]) return safeDiv(ts-e[0], e[1]-e[0]);
+  if(ts>=e[n]) return n+safeDiv(ts-e[n], e[n]-e[n-1]);
   let lo=0, hi=n;
   while(hi-lo>1){ const mid=(lo+hi)>>1; if(e[mid]<=ts) lo=mid; else hi=mid; }
-  return lo+(ts-e[lo])/(e[hi]-e[lo]);
+  return lo+safeDiv(ts-e[lo], e[hi]-e[lo]);
 }
 // 「何本目か」→ 時刻(秒)（上の逆変換）
 function logicalToTs(l){
@@ -2261,7 +2574,7 @@ $('catcher').addEventListener('pointerdown', e=>{
   e.preventDefault(); // チャート側に触れさせない
   const {x,y}=chartXY(e);
   if(y>priceAreaHeight()){ setFoot('出来高の枠には描けません。上のローソク足の中でどうぞ'); return; }
-  const price=yToP(y), t=xToTs(x);
+  const price=snapPrice(x,y), t=xToTs(x);
   if(price==null||t==null){ setFoot('チャートの内側をタップしてください'); return; }
 
   if(tool==='hline'){
@@ -2311,15 +2624,15 @@ window.addEventListener('pointermove', e=>{
   const {x,y}=chartXY(e);
   if(createStart && Math.hypot(x-createStart.x, y-createStart.y)>10) createMoved=true;
   if(creating.type==='hline'){
-    const pr=yToP(y); if(pr!=null){ creating.price=pr; setFoot('価格 '+fmtPrice(pr)+'（離すと確定）'); }
+    const pr=snapPrice(x,y); if(pr!=null){ creating.price=pr; setFoot('価格 '+fmtPrice(pr)+'（離すと確定）'); }
   } else if(creating.type==='arrow' || creating.type==='pos'){
-    const t2=xToTs(x), pr=yToP(y);
+    const t2=xToTs(x), pr=snapPrice(x,y);
     if(t2!=null&&pr!=null){
       creating.a={t:t2, p:pr};
       if(creating.type==='pos'){ creating.target=roundPrice(pr*1.14); creating.stop=roundPrice(pr*0.93); }
     }
   } else {
-    const t=xToTs(x), pr=yToP(y);
+    const t=xToTs(x), pr=snapPrice(x,y);
     if(t!=null&&pr!=null){ creating.b={t,p:pr}; setFoot(statsText(creating.a, creating.b)); }
   }
   layoutOverlay();   // 位置だけ更新（作り直さない）
@@ -2390,13 +2703,13 @@ window.addEventListener('pointermove', e=>{
   if(p.y>maxY) p.y=maxY;
   if(p.y<0) p.y=0;
   const d=drag.d, o=drag.orig;
-  if(d.type==='hline'){ const pr=yToP(p.y); if(pr!=null) d.price=pr; }
+  if(d.type==='hline'){ const pr=snapPrice(p.x,p.y); if(pr!=null) d.price=pr; }
   else if(d.type==='arrow'){ // 矢印: そのまま移動
-    const t=xToTs(p.x), pr=yToP(p.y); if(t!=null&&pr!=null) d.a={t, p:pr};
+    const t=xToTs(p.x), pr=snapPrice(p.x,p.y); if(t!=null&&pr!=null) d.a={t, p:pr};
   }
   else if(d.type==='poly'){ // 折線: 頂点を1つ動かす or 全体を平行移動
     if(drag.role==='v' && drag.vi>=0){
-      const t=xToTs(p.x), pr=yToP(p.y); if(t!=null&&pr!=null) d.pts[drag.vi]={t, p:pr};
+      const t=xToTs(p.x), pr=snapPrice(p.x,p.y); if(t!=null&&pr!=null) d.pts[drag.vi]={t, p:pr};
     } else {
       const l1=xToL(drag.start.x), l2=xToL(p.x), dp=yToP(p.y)-yToP(drag.start.y);
       if(l1!=null&&l2!=null&&!isNaN(dp)&&drag.lpts){
@@ -2409,8 +2722,8 @@ window.addEventListener('pointermove', e=>{
     }
   }
   else if(d.type==='pos'){ // 損益ツール: 緑端=利確 / 赤端=損切 / エントリー線=全体移動
-    if(drag.role==='a'){ const pr=yToP(p.y); if(pr!=null) d.target=pr; }
-    else if(drag.role==='b'){ const pr=yToP(p.y); if(pr!=null) d.stop=pr; }
+    if(drag.role==='a'){ const pr=snapPrice(p.x,p.y); if(pr!=null) d.target=pr; }
+    else if(drag.role==='b'){ const pr=snapPrice(p.x,p.y); if(pr!=null) d.stop=pr; }
     else {
       const l1=xToL(drag.start.x), l2=xToL(p.x), dp=yToP(p.y)-yToP(drag.start.y);
       if(l1!=null&&l2!=null&&!isNaN(dp)&&drag.la!=null){
@@ -2419,8 +2732,8 @@ window.addEventListener('pointermove', e=>{
       }
     }
   }
-  else if(drag.role==='a'){ const t=xToTs(p.x), pr=yToP(p.y); if(t!=null&&pr!=null) d.a={t, p:pr}; }
-  else if(drag.role==='b'){ const t=xToTs(p.x), pr=yToP(p.y); if(t!=null&&pr!=null) d.b={t, p:pr}; }
+  else if(drag.role==='a'){ const t=xToTs(p.x), pr=snapPrice(p.x,p.y); if(t!=null&&pr!=null) d.a={t, p:pr}; }
+  else if(drag.role==='b'){ const t=xToTs(p.x), pr=snapPrice(p.x,p.y); if(t!=null&&pr!=null) d.b={t, p:pr}; }
   else { // body：全体を平行移動（小数単位でなめらかに動く）
     const l1=xToL(drag.start.x), l2=xToL(p.x);
     const dp=yToP(p.y)-yToP(drag.start.y);
@@ -2525,6 +2838,17 @@ $('toolbar').addEventListener('click', e=>{
   if(b.dataset.tool) setTool(tool===b.dataset.tool ? null : b.dataset.tool);
 });
 $('colorPick').addEventListener('input', e=>{ drawColor=e.target.value; });
+
+/* マグネット吸着のON/OFF */
+function applyMagnetBtn(){
+  const b=$('magnetBtn'); if(b) b.classList.toggle('active', magnetOn);
+}
+$('magnetBtn').addEventListener('click', ()=>{
+  magnetOn=!magnetOn; store.set('mychart-magnet', magnetOn); applyMagnetBtn();
+  setFoot(magnetOn ? '吸着オン：線が高値・安値・始値・終値にピタッと合います'
+                   : '吸着オフ：指の位置そのままの価格になります');
+});
+applyMagnetBtn();
 
 // パン・ズームしたら重ねレイヤーも追従させる
 /* 描画シートをチャートと同じタイミングで動かす（ズーム時の遅れ対策）
@@ -2810,7 +3134,10 @@ $('tfButtons').addEventListener('click',e=>{
 /* ⚙ APIキー入力（端末に保存。コードには書かれない） */
 $('gear').addEventListener('click',()=>{
   const cur=store.get('td-key','');
-  askText('Twelve DataのAPIキーを入力（空にすると削除）\ntwelvedata.com で無料登録すると取得できます\n\nアプリの版数: '+APP_VERSION, cur, k=>{
+  const ac=apiCount();
+  askText('Twelve DataのAPIキーを入力（空にすると削除）\ntwelvedata.com で無料登録すると取得できます'
+    +'\n\n本日のAPI使用: 約'+ac.n+'回 / '+API_DAY_LIMIT+'回（端末側で数えた目安）'
+    +'\nアプリの版数: '+APP_VERSION, cur, k=>{
     store.set('td-key', (k||'').trim());
     for(const key in realCache) delete realCache[key]; // 入れ替えたのでキャッシュ破棄
     try{ localStorage.removeItem(DISK_KEY); }catch(e){}  // 端末の保存も消す
@@ -2841,7 +3168,8 @@ function ensureChart2(){
     rightPriceScale:{borderColor:'#232a36'}, timeScale:{borderColor:'#232a36'},
   });
   candle2=chart2.addSeries(LightweightCharts.CandlestickSeries,{
-    upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
+    upColor:'#26a69a',downColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350',
+    borderVisible:true, borderUpColor:'#26a69a', borderDownColor:'#ef5350'});
   paneScale(chart2,0,candle2).applyOptions({scaleMargins:{top:0.08,bottom:0.08}});
   volume2=chart2.addSeries(LightweightCharts.HistogramSeries,
     {priceFormat:{type:'volume'}, priceScaleId:'right'}, 1);
@@ -2945,12 +3273,10 @@ async function refreshNow(){
   if(layoutMode!=='1' && c2.ticker && !targets.includes(c2.ticker)) targets.push(c2.ticker);
   // メモリと端末の保存から、対象銘柄ぶんだけ削除
   Object.keys(htfFailed).forEach(k=>delete htfFailed[k]);   // 失敗の記録を消して再挑戦できるように
-  targets.forEach(t=>{
+  for(const t of targets){
     Object.keys(realCache).forEach(k=>{ if(k.startsWith(t+'@')) delete realCache[k]; });
-    const d=diskLoad();
-    Object.keys(d).forEach(k=>{ if(k.startsWith(t+'@')) delete d[k]; });
-    diskSave(d);
-  });
+    await diskDropTicker(t);
+  }
   setFoot('最新データを取得中…');
   // 価格帯別出来高の集計メモも捨てる（同じ本数でも中身が変わっている可能性がある）
   drawings.forEach(d=>{ if(d._vp) delete d._vp; });
@@ -3041,7 +3367,7 @@ if(navigator.storage && navigator.storage.persist){
 const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-last',
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
   'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
-  'mychart-logscale','mychart-tools-open'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
+  'mychart-logscale','mychart-tools-open','mychart-api-count','mychart-magnet','mychart-api-times'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
 function buildBackup(includeKey){
