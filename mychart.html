@@ -403,7 +403,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v31 (読み込み中の誤読防止)';
+const APP_VERSION='v33 (価格帯別出来高の精度改善)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -597,6 +597,18 @@ function symInfo(t){ return SYMBOLS.find(s=>s.ticker===t) || { ticker:t, name:'�
 /* APIの流量制御：無料枠は「1分あたり8回」。
    これを超えると失敗するので、超えそうな時は自動で少し待ってから投げる。
    （銘柄をスワイプで次々変えた時に上限に当たるのを防ぐ） */
+/* 下のバーにメッセージを出す。
+   apiGate / apiBump は main() の外にあるため、main() の中で定義された
+   関数は見えない。ここで最上位に置いておく。
+   これが無かったため、API上限に当たって待とうとした瞬間に
+   「Can't find variable: setFoot」で取得そのものが失敗し、
+   サンプル表示に落ちていた（v30でレート制限を保存したことで露出した）。
+   起動直後で要素がまだ無い場合も落ちないようにする */
+function setFoot(msg){
+  const f=document.getElementById('foot');
+  if(f) f.textContent = msg;
+}
+
 /* 上限は「1分8回」だが7回で止める。
    端末とサーバの時計が少しずれていると、8回目がサーバ側では
    前の1分に入って9回目と数えられることがあるため、1回ぶん余裕を持たせる */
@@ -2153,7 +2165,6 @@ $('indSave').addEventListener('click', ()=>{
    ・トレンド：両端の丸で長さ/角度を変更、線の真ん中で全体移動
    ・計測ボックス：四角で囲むと変化率%・値幅・本数を表示、角でリサイズ
    ========================================================= */
-function setFoot(msg){ $('foot').textContent = msg; }
 
 const svg = $('overlay');
 const TS = ()=>chart.timeScale();
@@ -2202,20 +2213,35 @@ function toEpoch(t){
    取得側で重複は除いているが、二重の保険としてここでも守る
    （Infinity を返すと、線が画面外へ飛んだり描画が壊れるため） */
 function safeDiv(num, den){ return den ? num/den : 0; }
+/* 時刻(秒) → 「何本目か」
+
+   足に付いている時刻は「その期間の始まり」（週足なら月曜、月足なら1日）だが、
+   画面ではその足の中央に描かれる。
+   そのため、足の時刻どうしを単純に比例配分すると、期間の途中の時刻が
+   次の足の位置まで押し出されてしまう。
+   実測では、日足で 7/24 に引いた線が
+     週足 → 57% 右へ / 月足 → 77% 右へ（ほぼ隣の足の位置）
+   ずれていた。
+
+   そこで「足 i の枠は logical i-0.5 〜 i+0.5」と考え、
+   期間内の位置をその枠の中に収める。こうすると
+   どの時間足で見ても、線は必ず“その時刻を含む足”の上に出る。
+   logicalToTs はこの逆変換なので、指で動かした位置ともズレない */
 function tsToLogical(ts){
   const e=epochs, n=e.length-1; if(n<1) return null;
-  if(ts<=e[0]) return safeDiv(ts-e[0], e[1]-e[0]);
-  if(ts>=e[n]) return n+safeDiv(ts-e[n], e[n]-e[n-1]);
+  if(ts<e[0])  return -0.5 + safeDiv(ts-e[0], e[1]-e[0]);
+  if(ts>=e[n]) return n-0.5 + safeDiv(ts-e[n], e[n]-e[n-1]);
   let lo=0, hi=n;
   while(hi-lo>1){ const mid=(lo+hi)>>1; if(e[mid]<=ts) lo=mid; else hi=mid; }
-  return lo+safeDiv(ts-e[lo], e[hi]-e[lo]);
+  return lo-0.5 + safeDiv(ts-e[lo], e[hi]-e[lo]);
 }
 // 「何本目か」→ 時刻(秒)（上の逆変換）
 function logicalToTs(l){
   const e=epochs, n=e.length-1; if(n<1) return null;
-  if(l<=0) return e[0]+l*(e[1]-e[0]);
-  if(l>=n) return e[n]+(l-n)*(e[n]-e[n-1]);
-  const i=Math.floor(l); return e[i]+(l-i)*(e[i+1]-e[i]);
+  const j=l+0.5;                       // tsToLogical の逆（枠の左端を基準にそろえる）
+  if(j<0)  return e[0]+j*(e[1]-e[0]);
+  if(j>=n) return e[n]+(j-n)*(e[n]-e[n-1]);
+  const i=Math.floor(j); return e[i]+(j-i)*(e[i+1]-e[i]);
 }
 // 画面の横位置 ⇔ 時刻(秒)
 function xToTs(x){ const l=xToL(x); if(l==null) return null; const ts=logicalToTs(l); return ts==null?null:Math.round(ts); }
@@ -2470,11 +2496,21 @@ function layoutOne(d){
       for(let i=iA;i<=iB;i++){ if(currentCandles[i].low<lo)lo=currentCandles[i].low; if(currentCandles[i].high>hi)hi=currentCandles[i].high; }
       const B=24, vols=new Array(B).fill(0);
       if(hi>lo){
+        // その足の値幅（安値〜高値）にまたがる段へ、出来高を按分して分配する。
+        // 以前は代表価格(HLC/3)の1段だけに全部入れていたため、
+        // 値幅の広い足（ギャップやバイオ株の急騰）があると
+        // 実際には取引があった価格帯が「出来高ゼロ」の空段になっていた。
+        // 実測では24段のうち12段が空になり、POCも1.5%ずれていた。
+        // TradingViewの価格帯別出来高と同じ考え方にそろえる。
+        // 按分しても出来高の合計は変わらない
         for(let i=iA;i<=iB;i++){
           const c=currentCandles[i];
-          const typ=(c.high+c.low+c.close)/3;                  // その足の代表価格
-          const k=Math.max(0, Math.min(B-1, Math.floor((typ-lo)/(hi-lo)*B)));
-          vols[k]+=(currentVols[i]?currentVols[i].value:0);
+          const vol=(currentVols[i]?currentVols[i].value:0);
+          if(!vol) continue;
+          const kL=Math.max(0, Math.min(B-1, Math.floor((c.low -lo)/(hi-lo)*B)));
+          const kH=Math.max(0, Math.min(B-1, Math.floor((c.high-lo)/(hi-lo)*B)));
+          const share=vol/(kH-kL+1);
+          for(let k=kL;k<=kH;k++) vols[k]+=share;
         }
       }
       const maxV=Math.max(...vols, 1);
