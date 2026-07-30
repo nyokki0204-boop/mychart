@@ -21,7 +21,7 @@
     display:flex; flex-direction:column; overflow:hidden; }
   .mono { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-variant-numeric:tabular-nums; }
 
-  header { display:flex; align-items:center; gap:6px; padding:5px 12px; min-width:0;
+  header { display:flex; align-items:center; gap:4px; padding:5px 10px; min-width:0;
     background:var(--panel); border-bottom:1px solid var(--line); }
   .sym-btn { display:flex; align-items:center; gap:6px; background:transparent;
     border:none; color:var(--text); font-size:17px; font-weight:700; letter-spacing:.5px; cursor:pointer;
@@ -31,7 +31,7 @@
   .sym-btn .caret, .sym-btn .fav { flex:0 0 auto; }
   .sym-btn .caret { color:var(--muted); font-size:12px; }
   .sym-btn .fav { color:var(--star); font-size:14px; }
-  .badge { font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; letter-spacing:.5px; }
+  .badge { flex:0 0 auto; font-size:10px; font-weight:700; padding:2px 4px; border-radius:4px; letter-spacing:0; }
   .badge.real   { background:rgba(38,166,154,.18); color:var(--up); }
   .badge.sample { background:rgba(120,123,134,.18); color:var(--muted); }
   .gear { margin-left:auto; background:transparent; border:none; color:var(--muted); font-size:18px; cursor:pointer; }
@@ -77,6 +77,12 @@
     background:rgba(22,27,36,.9); border:1px solid var(--line); color:var(--text);
     border-radius:6px; padding:6px 10px; font-size:12px; font-weight:700; cursor:pointer; }
   body.max #unmaxBtn { display:block; }
+  /* 銘柄の前/次ボタン。
+     横スワイプはブラウザの「戻る」と取り合いになって誤作動するため、
+     確実に押せる手段を用意する */
+  .navsym { flex:0 0 auto; width:26px; background:transparent; border:1px solid var(--line);
+    color:var(--text); font-size:20px; line-height:1; padding:5px 0; border-radius:7px; cursor:pointer; }
+  .navsym:active { background:var(--accent); border-color:var(--accent); color:#fff; }
   #maxBtn, #refreshBtn, #penBtn { background:transparent; border:1px solid var(--line); color:var(--muted);
     border-radius:6px; padding:4px 9px; font-size:12px; font-weight:700; cursor:pointer; margin-left:6px; }
   #refreshBtn.busy { opacity:.5; }
@@ -93,6 +99,9 @@
   .tools button { background:#1c2431; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12px; font-weight:600; cursor:pointer; }
   .tools button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
   .tools input[type=color] { width:30px; height:30px; padding:0; border:1px solid var(--line); border-radius:6px; background:transparent; cursor:pointer; }
+  /* 下のバーの「◯分前の保存データ」表示。エラー(赤)とは別の色で、
+     異常ではないが注意して見てほしい、という位置づけ */
+  footer .old { color:var(--ema); }
   footer { padding:3px 12px; font-size:10px; color:var(--muted); border-top:1px solid var(--line); min-height:20px; line-height:1.4; }
   footer .err { color:var(--down); }
 
@@ -202,13 +211,14 @@
 <body>
 
   <header>
-    <button class="sym-btn" id="symBtn">
+    <button id="prevSym" class="navsym" title="前の銘柄">‹</button>
+    <button class="sym-btn" id="symBtn" title="タップでウォッチリスト">
       <span class="fav" id="hdrFav" style="display:none">★</span>
       <span id="hdrTicker">-</span>
-      <span class="caret">▾</span>
     </button>
+    <button id="nextSym" class="navsym" title="次の銘柄">›</button>
     <span class="badge sample" id="badge">サンプル</span>
-    <button id="layoutBtn" title="画面の分割を切り替え">1画面</button>
+    <button id="layoutBtn" title="画面の分割を切り替え">▢</button>
     <button id="penBtn" title="描画ツールの表示/非表示">✏</button>
     <button id="refreshBtn" title="最新データに更新">⟳</button>
     <button id="maxBtn" title="チャートを最大化">⛶</button>
@@ -403,7 +413,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v33 (価格帯別出来高の精度改善)';
+const APP_VERSION='v35 (保存データを即表示し、裏で最新に差し替え)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1072,18 +1082,48 @@ function diskPut(ticker, kind, raw){
     }
   });
 }
-async function diskGet(ticker, kind){
-  // 保存が壊れていても、チャートを止めずに「保存なし」として扱う。
-  // ここで例外が外へ出ると、取得の失敗として扱われてサンプル表示に落ちてしまう
+/* 保存を読む。期限切れかどうかも一緒に返す。
+   保存が壊れていても、チャートを止めずに「保存なし」として扱う
+   （ここで例外が外へ出ると、取得の失敗としてサンプル表示に落ちてしまう） */
+async function diskRead(ticker, kind){
   try{
     const k=ticker+'@'+kind;
     await idbMigrate();
     const rec = (await idbGet(k)) || lsLoad()[k];   // 引っ越し前のデータも読める
     if(!rec) return null;
+    const rows = rec.z ? unpackRows(rec.z) : (rec.raw||null);   // 旧形式もそのまま読める
+    if(!rows) return null;
     const ttl = kind==='65m' ? TTL_INTRA : TTL_DAILY;
-    if(Date.now()-(rec.at||0) > ttl) return null;
-    return rec.z ? unpackRows(rec.z) : (rec.raw||null);   // 旧形式もそのまま読める
+    const at = rec.at||0;
+    return { rows, at, fresh: (Date.now()-at) <= ttl };
   }catch(e){ return null; }
+}
+async function diskGet(ticker, kind){          // 期限内のものだけ返す（従来どおり）
+  const r=await diskRead(ticker, kind);
+  return (r && r.fresh) ? r.rows : null;
+}
+
+/* 裏でこっそり取り直す。
+   無料枠は1分7回なので、新しい銘柄を続けて開くと最大60秒待たされる。
+   「少し古い値でもすぐ見える」方が実用的なので、保存が期限切れでも
+   まず表示してしまい、順番が回ってきたら取り直して差し替える */
+const bgFetching={};
+function bgRefresh(ticker, kind){
+  const k=ticker+'@'+kind;
+  if(bgFetching[k]) return;                     // 二重に取りにいかない
+  bgFetching[k]=true;
+  (async()=>{
+    try{
+      const raw=await fetchReal(ticker, kind);
+      await diskPut(ticker, kind, raw);
+      // メモリ上の古い版を捨てて、見ていれば描き直す
+      Object.keys(realCache).forEach(x=>{ if(x.startsWith(ticker+'@')) delete realCache[x]; });
+      if(current.ticker===ticker) render();
+      else if(c2 && c2.ticker===ticker) render2();
+    }catch(e){
+      // 取り直せなくても、古いデータは表示されたままなので致命的ではない
+    }finally{ delete bgFetching[k]; }
+  })();
 }
 /* 指定した銘柄の保存を消す（「今すぐ最新に」で使う） */
 function diskDropTicker(ticker){
@@ -1134,24 +1174,45 @@ function memTouch(ticker){
   }
 }
 
+/* 保存が期限切れだった場合、その保存時刻を入れて返す（0なら最新）。
+   呼び出し側は「◯分前のデータです」と出すのに使う */
 async function loadData(ticker, step){
   const memKey=ticker+'@'+step;
   memTouch(ticker);
   if(realCache[memKey]) return realCache[memKey];
 
+  const kind = step==='65m' ? '65m' : '1d';
+
   if(step==='65m'){
-    let raw=await diskGet(ticker,'65m');
-    if(!raw){ raw=await fetchReal(ticker,'65m'); diskPut(ticker,'65m',raw); }
-    return realCache[memKey]=pack(raw);
+    const rec=await diskRead(ticker,'65m');
+    let raw, staleAt=0;
+    if(rec && rec.fresh){ raw=rec.rows; }
+    else if(rec){ raw=rec.rows; staleAt=rec.at; bgRefresh(ticker,'65m'); }  // 古くてもまず出す
+    else { raw=await fetchReal(ticker,'65m'); diskPut(ticker,'65m',raw); }
+    const p=pack(raw); p._staleAt=staleAt;
+    return realCache[memKey]=p;
   }
+
   // 日足を用意（端末の保存 → 無ければAPIで1回だけ取得）
-  let daily=realCache[ticker+'@__daily'];
+  let daily=realCache[ticker+'@__daily'], staleAt=realCache[ticker+'@__staleAt']||0;
   if(!daily){
-    daily=await diskGet(ticker,'1d');
-    if(!daily){ daily=await fetchReal(ticker,'1d'); diskPut(ticker,'1d',daily); }
+    const rec=await diskRead(ticker,'1d');
+    if(rec && rec.fresh){ daily=rec.rows; staleAt=0; }
+    else if(rec){ daily=rec.rows; staleAt=rec.at; bgRefresh(ticker,'1d'); }  // 古くてもまず出す
+    else { daily=await fetchReal(ticker,'1d'); diskPut(ticker,'1d',daily); staleAt=0; }
     realCache[ticker+'@__daily']=daily;
+    realCache[ticker+'@__staleAt']=staleAt;
   }
-  return realCache[memKey]=pack(deriveFrom(daily, step));
+  const p=pack(deriveFrom(daily, step)); p._staleAt=staleAt;
+  return realCache[memKey]=p;
+}
+
+/* 「◯分前」の文言 */
+function ageText(at){
+  const m=Math.max(0, Math.floor((Date.now()-at)/60000));
+  if(m<60) return m+'分前';
+  const h=Math.floor(m/60);
+  return h<24 ? h+'時間前' : Math.floor(h/24)+'日前';
 }
 
 /* 実データのキャッシュ（APIの回数を節約） */
@@ -1279,10 +1340,18 @@ function setMode(mode, msg){
 }
 
 /* 読み込み中の覆いを出す/消す */
+/* 読み込み中の覆い。
+   保存から即座に出せる時まで覆うと一瞬ちらつくので、
+   250ms 以上かかりそうな時だけ出す */
+let loadTimer=null;
 function setLoading(on, msg){
-  document.body.classList.toggle('loading', !!on);
-  const el=$('staleNote');
-  if(el && on) el.textContent=msg||'読み込み中…';
+  clearTimeout(loadTimer);
+  if(!on){ document.body.classList.remove('loading'); return; }
+  loadTimer=setTimeout(()=>{
+    const el=$('staleNote');
+    if(el) el.textContent=msg||'読み込み中…';
+    document.body.classList.add('loading');
+  }, 250);
 }
 
 /* 描画の順番を守るための番号札。
@@ -1314,6 +1383,12 @@ async function render(){
       draw(d); setMode('real');
       priceRemember(ticker, d.candles);      // 実データが取れた時だけ価格を記憶
       renderList();
+      // 期限切れの保存を出した場合は、いつのデータかを必ず伝える。
+      // 黙って古い値を見せるのは「架空の数字を出さない」方針に反する
+      if(d._staleAt){
+        $('foot').innerHTML='<span class="old">'+escHtml(ageText(d._staleAt))
+          +'の保存データを表示中。順番が来たら最新に差し替えます</span>';
+      }
     }catch(err){
       if(my!==renderToken) return;
       draw(sampleDataset(ticker, step));
@@ -3286,7 +3361,7 @@ function setLayout(m){
   layoutMode=m; store.set('mychart-layout', m);
   $('splitWrap').className = m==='v' ? 'split-v' : m==='h' ? 'split-h' : 'split-1';
   $('c2pane').style.display = (m==='1') ? 'none' : 'flex';
-  $('layoutBtn').textContent = m==='1' ? '1画面' : m==='v' ? '上下' : '左右';
+  $('layoutBtn').textContent = m==='1' ? '▢' : m==='v' ? '▤' : '▥';   // 1画面 / 上下 / 左右
   if(m!=='1'){ ensureChart2(); render2(); }
   // 大きさが変わるので、少し待ってからチャートに新しいサイズを教える
   setTimeout(resizeAll, 60);
@@ -3366,6 +3441,8 @@ function setToolsOpen(on){
   if(!toolsOpen && tool) setTool(null);  // 隠す時は描画中のツールを解除しておく
   setTimeout(resizeAll, 60);
 }
+$('prevSym').addEventListener('click', ()=>stepSymbol(-1, 1));
+$('nextSym').addEventListener('click', ()=>stepSymbol(+1, 1));
 $('penBtn').addEventListener('click', ()=>setToolsOpen(!toolsOpen));
 setToolsOpen(toolsOpen);
 $('maxBtn').addEventListener('click', ()=>setMax(true));
@@ -3394,7 +3471,14 @@ function stepSymbol(dir, target){
 function swipeTarget(el, target){
   if(!el) return;
   let sx=0, sy=0, t0=0, tracking=false;
-  el.addEventListener('pointerdown', e=>{ sx=e.clientX; sy=e.clientY; t0=Date.now(); tracking=true; });
+  el.addEventListener('pointerdown', e=>{
+    // 画面の左右端から始まるスワイプは、ブラウザの「戻る/進む」と
+    // 取り合いになって誤作動するので、こちらでは拾わない。
+    // 端から離れた場所でのスワイプはこれまでどおり使える
+    const W=window.innerWidth||390;
+    if(e.clientX<48 || e.clientX>W-48){ tracking=false; return; }
+    sx=e.clientX; sy=e.clientY; t0=Date.now(); tracking=true;
+  });
   window.addEventListener('pointerup', e=>{
     if(!tracking) return; tracking=false;
     const dx=e.clientX-sx, dy=e.clientY-sy;
