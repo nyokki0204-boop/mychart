@@ -413,7 +413,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v36 (タップで描画の値が変わるバグを修正)';
+const APP_VERSION='v37 (時間足を変えると描画が飛ぶバグを修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1302,6 +1302,11 @@ let drawingsMap=store.get('mychart-drawings', {});
 const $=id=>document.getElementById(id);
 const isFav=t=>favs.includes(t);
 
+/* 描画の置き直しが必要かを判断するための目印。
+   draw() から参照するので、draw() より前で宣言しておく
+   （let は巻き上げされないため、後ろに置くと起動時に例外になる） */
+let lastSyncKey='';
+
 function draw(d){
   candleSeries.setData(d.candles); volumeSeries.setData(d.vols);
   // 出来高の移動平均線を計算して重ねる
@@ -1331,6 +1336,25 @@ function draw(d){
   lastCandle=d.candles[d.candles.length-1]||null; lastVol=d.vols[d.vols.length-1]||null;
   updateLegend(lastCandle,lastVol);
   redrawOverlay();
+
+  /* 時間足を切り替えた直後は、チャート側の「表示範囲」がまだ前の時間足のまま
+     （setVisibleLogicalRange は次の描画まで反映されない）。
+     その状態で線の位置を計算すると、例えば日足→週足で
+       x =（週足での位置 490.6 − 日足の左端 2440）× 15.2px ≒ −29,700px
+     となり、線が画面の遥か左へ飛ぶ。実測でも端点が左端に張り付いていた。
+
+     さらに syncLoop は「表示範囲が変わった時だけ」置き直す仕組みなので、
+     一度ズレた状態で範囲の値が変わらないと、ズレたまま固定されてしまう。
+     そこで、範囲が実際に更新されてから必ず1回は置き直す。
+     lastSyncKey も空にして、次のループで確実に再計算させる */
+  requestAnimationFrame(()=>{
+    lastSyncKey='';
+    try{ layoutOverlay(); drawIndShapes(); }catch(e){}
+    requestAnimationFrame(()=>{
+      lastSyncKey='';
+      try{ layoutOverlay(); drawIndShapes(); }catch(e){}
+    });
+  });
 }
 function setMode(mode, msg){
   const b=$('badge');
@@ -3003,7 +3027,7 @@ applyMagnetBtn();
    「表示範囲が変わったよ」という連絡を待つと半歩遅れるので、
    画面の更新ごと(毎フレーム)に「表示範囲が変わったか」を自分で確かめて、
    変わった時だけ位置を計算し直す。変わっていなければ何もしない（省エネ） */
-let lastSyncKey='';
+// lastSyncKey は draw() より前（上の方）で宣言している
 function viewKey(){
   const r=TS().getVisibleLogicalRange();
   const w=$('chart').clientWidth, h=$('chart').clientHeight;
