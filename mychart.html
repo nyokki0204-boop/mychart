@@ -50,6 +50,10 @@
     text-shadow:0 0 4px var(--bg), 0 0 3px var(--bg), 0 0 2px var(--bg); }
   .legend .item { color:var(--muted); }
   .legend .item b { color:var(--text); font-weight:600; margin-left:4px; }
+  /* 日付は先頭に置くので余白を詰め、少し明るく */
+  #lg-date { margin-left:0; color:#fff; }
+  /* 当日の足など、まだ確定していない可能性がある足の印 */
+  #lg-prov { color:var(--ema); margin-left:4px; font-weight:700; }
   .legend .up { color:var(--up); } .legend .down { color:var(--down); }
   /* ヘッダーと数値の行は左右スワイプで銘柄切替に使うので、文字選択を無効に */
   header, .legend { -webkit-user-select:none; user-select:none; touch-action:pan-y; }
@@ -274,6 +278,7 @@
       <div id="indChips"></div>
       <div id="staleNote"></div>
       <div class="legend mono">
+        <span class="item" id="lg-date-wrap"><b id="lg-date">-</b></span>
         <span class="item">O<b id="lg-o">-</b></span>
         <span class="item">H<b id="lg-h">-</b></span>
         <span class="item">L<b id="lg-l">-</b></span>
@@ -422,7 +427,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v42 (ページ全体が拡大してしまう問題を修正)';
+const APP_VERSION='v43 (日付表示・出来高の桁・速報値の警告)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1531,11 +1536,36 @@ function applyPricePrecision(series, lastClose){
   const d=priceDigits(lastClose);
   try{ series.applyOptions({ priceFormat:{ type:'price', precision:d, minMove:MIN_MOVE[d] } }); }catch(e){}
 }
+/* 足の時刻を画面用に整える。65分足は時刻まで、それ以外は日付だけ */
+function barLabel(t){
+  try{
+    if(typeof t==='number'){
+      const d=new Date(t*1000);
+      return (d.getUTCMonth()+1)+'/'+d.getUTCDate()+' '
+        +String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');
+    }
+    const p=String(t).slice(0,10).split('-');
+    return p.length>=3 ? (+p[1])+'/'+(+p[2]) : String(t);
+  }catch(e){ return String(t); }
+}
+/* 出来高を照合しやすい桁数で出す。
+   以前は「2.85B」としか出ず、2,845〜2,855Mのどこか分からないため
+   他サイトと突き合わせられなかった */
+function fmtVolPrecise(n){
+  if(n==null || !isFinite(n)) return '-';
+  const a=Math.abs(n);
+  if(a===0) return '0';
+  if(a>=1e9) return (n/1e6).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',')+'M';
+  if(a>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(a>=1000) return (n/1000).toFixed(1)+'K';
+  return String(Math.round(n));
+}
 function updateLegend(c,v){
   if(!c) return;
+  $('lg-date').textContent=barLabel(c.time);
   $('lg-o').textContent=fmtPrice(c.open); $('lg-h').textContent=fmtPrice(c.high);
   $('lg-l').textContent=fmtPrice(c.low);  $('lg-c').textContent=fmtPrice(c.close);
-  $('lg-vol').textContent=v?fmtVol(v.value):'-';
+  $('lg-vol').textContent=v?fmtVolPrecise(v.value):'-';
   // 「前日比」は“ひとつ前の足の終値”と比べるのが正しい。
   // （以前はその足の始値と比べていたため、TradingViewと数値が合わなかった）
   const i=currentCandles.findIndex(x=>x.time===c.time);
@@ -1543,6 +1573,27 @@ function updateLegend(c,v){
   const base = (prev && prev.close) ? prev.close : c.open;
   const chg=(c.close-base)/base*100, el=$('lg-chg');
   el.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%'; el.className=chg>=0?'up':'down';
+
+  /* 一番新しい足は、取引終了直後だと出来高がまだ確定していないことがある。
+     実際にある銘柄で、確定後の2割ほどしか入っていない例を確認した。
+     「出来高が平均の2倍か」の判断を誤らせるため、疑わしい時は印を出す。
+     直近20本の中央値の40%未満なら、まだ集計中の可能性が高い */
+  let prov='';
+  if(i===currentCandles.length-1 && v && currentVols && currentVols.length>=6){
+    const past=[];
+    for(let k=Math.max(0,i-20);k<i;k++) if(currentVols[k] && currentVols[k].value>0) past.push(currentVols[k].value);
+    if(past.length>=5){
+      past.sort((a,b)=>a-b);
+      const med=past[Math.floor(past.length/2)];
+      if(med>0 && v.value < med*0.4) prov='速報';
+    }
+  }
+  let pe=$('lg-prov');
+  if(prov){
+    if(!pe){ pe=document.createElement('b'); pe.id='lg-prov'; $('lg-date-wrap').appendChild(pe); }
+    pe.textContent='速報'; pe.title='この足の出来高はまだ集計中の可能性があります';
+  }else if(pe){ pe.textContent=''; }
+
   updateIndValues(i);   // インジの値も、同じ足のものに合わせる
 }
 chart.subscribeCrosshairMove(p=>{
