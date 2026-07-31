@@ -413,7 +413,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v39 (座標計算を自前化・診断表示つき)';
+const APP_VERSION='v40 (スワイプで描画が端に張り付くバグを修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2278,20 +2278,28 @@ const TS = ()=>chart.timeScale();
    正しく画面外の座標になり、端に張り付かない */
 function Lx(l){
   const ts=TS();
+  const n=epochs.length;
   let r=null;
   try{ r=ts.getVisibleLogicalRange(); }catch(e){}
-  if(!r || !isFinite(r.from) || !isFinite(r.to) || r.to===r.from){
-    const v=ts.logicalToCoordinate(l);
-    return (v==null||!isFinite(v)) ? null : v;
+  if(r && isFinite(r.from) && isFinite(r.to) && n>=2){
+    // 校正に使う2点は「表示範囲の中」かつ「データの中」から選ぶ。
+    // 表示範囲の端(r.from/r.to)はデータの外側にはみ出していることが多く
+    // （右側の余白など）、そこを部品に聞くと null が返ることがある。
+    // その時に古い計算へ落ちると、画面外の描画が端に張り付いてしまう。
+    // スワイプで線が画面外へ出た瞬間に左端に貼り付いていたのはこれが原因
+    let a=Math.max(0, Math.ceil(r.from)), b=Math.min(n-1, Math.floor(r.to));
+    if(b-a < 1){ a=0; b=n-1; }                    // 表示が狭すぎる時はデータ全体で校正
+    if(b>a){
+      const xa=ts.logicalToCoordinate(a), xb=ts.logicalToCoordinate(b);
+      if(xa!=null && xb!=null && isFinite(xa) && isFinite(xb) && xb!==xa){
+        const scale=(xb-xa)/(b-a);
+        const x=xa+(l-a)*scale;
+        if(isFinite(x)) return x;
+      }
+    }
   }
-  const x0=ts.logicalToCoordinate(r.from), x1=ts.logicalToCoordinate(r.to);
-  if(x0==null || x1==null || !isFinite(x0) || !isFinite(x1)){
-    const v=ts.logicalToCoordinate(l);
-    return (v==null||!isFinite(v)) ? null : v;
-  }
-  const scale=(x1-x0)/(r.to-r.from);
-  const x=x0+(l-r.from)*scale;
-  return isFinite(x) ? x : null;
+  const v=ts.logicalToCoordinate(l);
+  return (v==null||!isFinite(v)) ? null : v;
 }
 
 /* 描画の位置がおかしい時に、原因を画面に出すための診断。
@@ -3532,10 +3540,16 @@ $('refreshBtn').addEventListener('click', refreshNow);
 (function(){
   let t=null;
   const btn=$('refreshBtn');
-  const start=()=>{ clearTimeout(t); t=setTimeout(()=>{ diagOnce=true; diagDrawing(); }, 700); };
+  const start=()=>{ clearTimeout(t); diagOnce=false;
+    t=setTimeout(()=>{ diagOnce=true; diagDrawing(); }, 700); };
   const stop =()=>{ clearTimeout(t); };
   btn.addEventListener('pointerdown', start);
   ['pointerup','pointerleave','pointercancel'].forEach(ev=>btn.addEventListener(ev, stop));
+  // 長押しの直後は指を離した時の「タップ」を無効にする。
+  // そうしないと診断を出した直後に更新が走り、表示が消えるうえAPIも1回使ってしまう
+  btn.addEventListener('click', e=>{
+    if(diagOnce){ diagOnce=false; e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
 })();
 
 /* 描画ツールの段の開閉。
