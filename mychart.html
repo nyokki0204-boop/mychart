@@ -413,7 +413,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v37 (時間足を変えると描画が飛ぶバグを修正)';
+const APP_VERSION='v38 (時間足切替の描画ズレを再修正・端点の誤表示を防止)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1306,6 +1306,11 @@ const isFav=t=>favs.includes(t);
    draw() から参照するので、draw() より前で宣言しておく
    （let は巻き上げされないため、後ろに置くと起動時に例外になる） */
 let lastSyncKey='';
+/* データを入れ替えた直後、何フレームぶん強制的に置き直すか。
+   時間足を切り替えると、チャート側の表示範囲が実際に更新されるまで
+   数フレーム遅れることがある。その間に線を置くと前の時間足の縮尺で
+   計算され、画面の端に張り付いてしまうため、しばらく置き直し続ける */
+let relayoutFrames=0;
 
 function draw(d){
   candleSeries.setData(d.candles); volumeSeries.setData(d.vols);
@@ -1347,14 +1352,9 @@ function draw(d){
      一度ズレた状態で範囲の値が変わらないと、ズレたまま固定されてしまう。
      そこで、範囲が実際に更新されてから必ず1回は置き直す。
      lastSyncKey も空にして、次のループで確実に再計算させる */
-  requestAnimationFrame(()=>{
-    lastSyncKey='';
-    try{ layoutOverlay(); drawIndShapes(); }catch(e){}
-    requestAnimationFrame(()=>{
-      lastSyncKey='';
-      try{ layoutOverlay(); drawIndShapes(); }catch(e){}
-    });
-  });
+  // 表示範囲がチャート側に反映されるまで数フレームかかることがあるため、
+  // しばらくの間は毎フレーム必ず置き直す（1〜2回では間に合わない端末がある）
+  relayoutFrames=20;
 }
 function setMode(mode, msg){
   const b=$('badge');
@@ -2636,8 +2636,14 @@ function layoutOne(d){
     setPos(parts.hitB,{cx:xb, cy:yMid}); setPos(parts.visB,{cx:xb, cy:yMid});
     return;
   }
+  // 時刻や価格が壊れている図形は描かない（NaNのまま描くと画面の隅に張り付く）
+  if(!isFinite(d.a.t)||!isFinite(d.b.t)||!isFinite(d.a.p)||!isFinite(d.b.p)){
+    showParts(parts,false); return;
+  }
   const x1=tsToX(d.a.t), y1=Py(d.a.p), x2=tsToX(d.b.t), y2=Py(d.b.p);
-  if(x1==null||y1==null||x2==null||y2==null){ showParts(parts,false); return; }
+  if(x1==null||y1==null||x2==null||y2==null||!isFinite(x1)||!isFinite(x2)||!isFinite(y1)||!isFinite(y2)){
+    showParts(parts,false); return;
+  }
   showParts(parts,true);
   if(d.type==='rect'){
     const x=Math.min(x1,x2), y=Math.min(y1,y2), w=Math.abs(x2-x1), h=Math.abs(y2-y1);
@@ -2648,8 +2654,19 @@ function layoutOne(d){
     setPos(parts.hit,{x1,y1,x2,y2});
     setPos(parts.vis,{x1,y1,x2,y2,'stroke-width':d.width||2,'stroke-dasharray':dashOf(d.style)});
   }
-  setPos(parts.hitA,{cx:x1,cy:y1}); setPos(parts.visA,{cx:x1,cy:y1});
-  setPos(parts.hitB,{cx:x2,cy:y2}); setPos(parts.visB,{cx:x2,cy:y2});
+  // 端点の丸は「画面の中にある時だけ」出す（TradingViewと同じ）。
+  // 画面外の端点をそのまま置くと、丸が左端や上端に張り付いて
+  // あたかもそこに節目があるように見えてしまう
+  const W=plotAreaWidth(), Hh=priceAreaHeight(), M=20;
+  const showHandle=(x,y)=> x>=-M && x<=W+M && y>=-M && y<=Hh+M;
+  const putHandle=(hit,vis,x,y,on)=>{
+    [hit,vis].forEach(n=>{ if(!n) return;
+      n.setAttribute('visibility', on?'visible':'hidden');
+      if(on) setPos(n,{cx:x,cy:y});
+    });
+  };
+  putHandle(parts.hitA, parts.visA, x1, y1, showHandle(x1,y1));
+  putHandle(parts.hitB, parts.visB, x2, y2, showHandle(x2,y2));
 }
 
 // 1点目の目印の位置を最新にする
@@ -3037,9 +3054,15 @@ function viewKey(){
 }
 (function syncLoop(){
   if(drawings.length || creating || pendingPoint || (indShapes && indShapes.length)){
-    const k=viewKey();
-    if(k!==lastSyncKey){ lastSyncKey=k; layoutOverlay(); drawIndShapes(); }
-  }
+    if(relayoutFrames>0){
+      relayoutFrames--;
+      lastSyncKey=viewKey();
+      try{ layoutOverlay(); drawIndShapes(); }catch(e){}
+    }else{
+      const k=viewKey();
+      if(k!==lastSyncKey){ lastSyncKey=k; layoutOverlay(); drawIndShapes(); }
+    }
+  }else if(relayoutFrames>0){ relayoutFrames--; }
   requestAnimationFrame(syncLoop);
 })();
 
