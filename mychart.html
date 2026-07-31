@@ -413,7 +413,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v38 (時間足切替の描画ズレを再修正・端点の誤表示を防止)';
+const APP_VERSION='v39 (座標計算を自前化・診断表示つき)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2268,7 +2268,49 @@ $('indSave').addEventListener('click', ()=>{
 const svg = $('overlay');
 const TS = ()=>chart.timeScale();
 // 「何本目か(logical)」「価格」⇔ 画面ピクセル の変換
-function Lx(l){ return TS().logicalToCoordinate(l); }
+/* 「何本目か」→ 画面の横位置。
+   チャート部品の logicalToCoordinate() は、表示範囲の外を指定すると
+   端に丸めて返すことがある。そのため画面外にあるはずの描画が
+   左端や右端に張り付いて、そこに節目があるように見えてしまっていた。
+
+   そこで、表示範囲の両端だけを部品に計算させ（ここは必ず正確）、
+   その2点から直線で外側へ延長する。こうすると画面外の点も
+   正しく画面外の座標になり、端に張り付かない */
+function Lx(l){
+  const ts=TS();
+  let r=null;
+  try{ r=ts.getVisibleLogicalRange(); }catch(e){}
+  if(!r || !isFinite(r.from) || !isFinite(r.to) || r.to===r.from){
+    const v=ts.logicalToCoordinate(l);
+    return (v==null||!isFinite(v)) ? null : v;
+  }
+  const x0=ts.logicalToCoordinate(r.from), x1=ts.logicalToCoordinate(r.to);
+  if(x0==null || x1==null || !isFinite(x0) || !isFinite(x1)){
+    const v=ts.logicalToCoordinate(l);
+    return (v==null||!isFinite(v)) ? null : v;
+  }
+  const scale=(x1-x0)/(r.to-r.from);
+  const x=x0+(l-r.from)*scale;
+  return isFinite(x) ? x : null;
+}
+
+/* 描画の位置がおかしい時に、原因を画面に出すための診断。
+   推測ではなく実際の数値を見て直せるようにする */
+let diagOnce=false;
+function diagDrawing(){
+  try{
+    const d=drawings.find(x=>x && x.a && isFinite(x.a.t));
+    if(!d) return;
+    const ts=TS(); const r=ts.getVisibleLogicalRange();
+    const la=tsToLogical(d.a.t), xa=tsToX(d.a.t);
+    const n=epochs.length;
+    const dt=t=>{ try{ return new Date(t*1000).toISOString().slice(0,10); }catch(e){ return String(t); } };
+    setFoot('診断 '+current.step+' 足'+n+'本 範囲'
+      +(r? (Math.round(r.from)+'〜'+Math.round(r.to)) : '不明')
+      +' / 線A '+dt(d.a.t)+' → '+(la==null?'null':la.toFixed(1))+'本目 x='+(xa==null?'null':Math.round(xa))
+      +' / データ '+dt(epochs[0])+'〜'+dt(epochs[n-1]));
+  }catch(e){}
+}
 function Py(p){ return candleSeries.priceToCoordinate(p); }
 function xToL(x){ return TS().coordinateToLogical(x); }
 function yToP(y){ return candleSeries.coordinateToPrice(y); }
@@ -3485,6 +3527,16 @@ async function refreshNow(){
   btn.classList.remove('busy');
 }
 $('refreshBtn').addEventListener('click', refreshNow);
+/* ⟳ を長押しすると、描画の位置の診断を下のバーに出す。
+   位置がおかしい時、推測ではなく実際の数値で原因を切り分けるため */
+(function(){
+  let t=null;
+  const btn=$('refreshBtn');
+  const start=()=>{ clearTimeout(t); t=setTimeout(()=>{ diagOnce=true; diagDrawing(); }, 700); };
+  const stop =()=>{ clearTimeout(t); };
+  btn.addEventListener('pointerdown', start);
+  ['pointerup','pointerleave','pointercancel'].forEach(ev=>btn.addEventListener(ev, stop));
+})();
 
 /* 描画ツールの段の開閉。
    常時表示だと、iPhoneの狭い画面ではチャートが47pxぶん削られてしまう。
