@@ -152,8 +152,17 @@
   .modalBack { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none;
     align-items:center; justify-content:center; z-index:20; }
   .modalBack.open { display:flex; }
+  /* 画面より高くならないようにする。
+     インジの設定は項目が15個ほどになることがあり、以前は下の
+     「保存」ボタンが画面の外へ押し出されて押せなくなっていた */
   .modal { background:var(--panel); border:1px solid var(--line); border-radius:12px;
-    padding:16px; width:84%; max-width:320px; }
+    padding:16px; width:84%; max-width:320px;
+    max-height:88vh; display:flex; flex-direction:column; min-height:0; }
+  /* 中身だけをスクロールさせ、ボタンの行は常に見えるようにする */
+  #indParams, #indEditor { flex-direction:column; min-height:0; }
+  #indParamFields, #indList { overflow-y:auto; -webkit-overflow-scrolling:touch; min-height:0; }
+  #indParamFields { border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .modal .mbtns { flex:0 0 auto; }
   .modal .mtitle { font-size:14px; font-weight:700; margin-bottom:10px; white-space:pre-line; }
   .modal input { width:100%; background:#0e1117; border:1px solid var(--line); color:var(--text);
     border-radius:6px; padding:9px 10px; font-size:14px; }
@@ -413,7 +422,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v40 (スワイプで描画が端に張り付くバグを修正)';
+const APP_VERSION='v41 (設定画面が画面からはみ出す問題を修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2165,7 +2174,7 @@ function openIndSettings(ind){
   box._inputs=inputs;
   // 画面を「設定」に切り替え
   $('indList').style.display='none'; $('indListBtns').style.display='none';
-  $('indEditor').style.display='none'; $('indParams').style.display='block';
+  $('indEditor').style.display='none'; $('indParams').style.display='flex';
   $('indBack').classList.add('open');
 }
 function backToIndList(){
@@ -2239,7 +2248,7 @@ function openIndEditor(ind){
   $('indName').value = ind ? ind.name : '';
   $('indCode').value = ind ? ind.code : IND_TEMPLATE;
   $('indList').style.display='none'; $('indListBtns').style.display='none';
-  $('indEditor').style.display='block';
+  $('indEditor').style.display='flex';
 }
 $('indBtn').addEventListener('click', openIndMgr);
 $('indClose').addEventListener('click', ()=>$('indBack').classList.remove('open'));
