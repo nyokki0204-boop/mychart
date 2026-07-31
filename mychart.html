@@ -14,7 +14,7 @@
     --accent:#2962ff; --star:#f5c518;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  html { height:100%; }
+  html { height:100%; touch-action:manipulation; }   /* 2回タップでの拡大を無効に */
   /* 画面の高さぴったりに合わせる。100dvh=スマホのアドレスバーを除いた実際の見える高さ */
   body { margin:0; height:100dvh; min-height:100dvh; background:var(--bg); color:var(--text);
     font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif; overscroll-behavior:none;
@@ -422,7 +422,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v41 (設定画面が画面からはみ出す問題を修正)';
+const APP_VERSION='v42 (ページ全体が拡大してしまう問題を修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -616,6 +616,29 @@ function symInfo(t){ return SYMBOLS.find(s=>s.ticker===t) || { ticker:t, name:'�
 /* APIの流量制御：無料枠は「1分あたり8回」。
    これを超えると失敗するので、超えそうな時は自動で少し待ってから投げる。
    （銘柄をスワイプで次々変えた時に上限に当たるのを防ぐ） */
+/* iOSのSafari/Chromeは viewport の user-scalable=no を無視するため、
+   2本指のつまむ操作や素早い2回タップで「ページ全体」が拡大してしまう。
+   チャートの拡大縮小はチャート部品が指の動き(touch)で自前に行うので、
+   ブラウザ側の拡大だけを止める。
+   ・gesture系 … iOS独自の2本指ズーム。これを止めるのが本命
+   ・2回タップ … touch-action:manipulation で無効になるが、
+     効かない場面があるので時間差でも判定して止める */
+(function(){
+  ['gesturestart','gesturechange','gestureend'].forEach(ev=>{
+    document.addEventListener(ev, e=>{ e.preventDefault(); }, {passive:false});
+  });
+  let lastTouch=0;
+  document.addEventListener('touchend', e=>{
+    const now=Date.now();
+    if(now-lastTouch < 320 && e.touches.length===0) e.preventDefault();  // 2回タップ拡大
+    lastTouch=now;
+  }, {passive:false});
+  // 指2本以上が同時に触れた時、チャート以外では既定動作をさせない
+  document.addEventListener('touchmove', e=>{
+    if(e.touches.length>1) e.preventDefault();
+  }, {passive:false});
+})();
+
 /* 下のバーにメッセージを出す。
    apiGate / apiBump は main() の外にあるため、main() の中で定義された
    関数は見えない。ここで最上位に置いておく。
