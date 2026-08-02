@@ -314,6 +314,7 @@
       <div class="bbtns">
         <button id="bkExport">書き出す</button>
         <button id="bkImport">読み込む</button>
+        <button id="bkUndo">ひとつ前に戻す</button>
       </div>
       <div class="warn">※Safariは7日間開かないと保存内容を消すことがあります。時々「書き出す」で保存しておくと安心です。</div>
     </div>
@@ -427,7 +428,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v43 (日付表示・出来高の桁・速報値の警告)';
+const APP_VERSION='v45 (リスト削除も取り消せるように)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -3321,9 +3322,14 @@ function renderTabs(){
         return;
       }
       const L=activeList();
+      // 消す前に今の状態を退避しておく。
+      // 銘柄を何十件も入れたリストを誤って消すと作り直しが大変なため、
+      // ⚙の「ひとつ前に戻す」で復旧できるようにする
+      if(typeof saveUndo==='function') saveUndo();
       lists=lists.filter(x=>x.id!==L.id); activeListId=lists[0].id;
       saveLists(); store.set('mychart-active-list',activeListId);
       renderTabs(); renderList();
+      setFoot('「'+L.name+'」を削除しました（⚙の「ひとつ前に戻す」で復旧できます）');
     });
     tabs.appendChild(del);
   }
@@ -3799,15 +3805,44 @@ function importFromFile(){
 }
 
 // バックアップの中身を実際に適用する（ファイル・文字貼り付け共通）
+/* 復元の直前に、今の設定を「ひとつ前」として端末に退避しておく。
+   間違ったファイルを選ぶと今までのウォッチリストや描画が上書きされ、
+   確認も無く戻せなかった。⚙の「ひとつ前に戻す」で復旧できるようにする */
+const UNDO_KEY='mychart-undo';
+function saveUndo(){
+  try{
+    const d={_app:'mychart', _at:new Date().toISOString()};
+    BK_KEYS.forEach(k=>{ const v=localStorage.getItem(k); if(v!=null) d[k]=v; });
+    localStorage.setItem(UNDO_KEY, JSON.stringify(d));
+    return true;
+  }catch(e){ return false; }   // 容量不足でも復元自体は続行する
+}
 function applyBackupText(text){
   try{
     const data=JSON.parse(text);
     if(!data || data._app!=='mychart') throw new Error('このアプリのバックアップではないようです');
-    let n=0;
-    BK_KEYS.forEach(k=>{ if(data[k]!=null){ localStorage.setItem(k, data[k]); n++; } });
-    setFoot(n+'件の設定を復元しました。画面を読み込み直します…');
-    setTimeout(()=>location.reload(), 800);
+    // 中身が空同然のファイルは、事故で全部消したのと同じになるので止める
+    const found=BK_KEYS.filter(k=>data[k]!=null);
+    if(found.length===0) throw new Error('中身が空のようです（復元を中止しました）');
+    saveUndo();                                   // ← 今の状態を退避
+    found.forEach(k=>localStorage.setItem(k, data[k]));
+    setFoot(found.length+'件を復元しました（⚙の「ひとつ前に戻す」で取り消せます）。読み込み直します…');
+    setTimeout(()=>location.reload(), 1200);
   }catch(e){ setFoot('読み込めませんでした: '+(e&&e.message?e.message:'')); }
+}
+/* 直前の復元を取り消す */
+function undoRestore(){
+  try{
+    const raw=localStorage.getItem(UNDO_KEY);
+    if(!raw){ setFoot('戻せる状態がありません'); return; }
+    const d=JSON.parse(raw);
+    const found=BK_KEYS.filter(k=>d[k]!=null);
+    if(!found.length){ setFoot('戻せる状態がありません'); return; }
+    saveUndo();                                   // 「戻す」の取り消しもできるように
+    found.forEach(k=>localStorage.setItem(k, d[k]));
+    setFoot('ひとつ前の状態に戻しました。読み込み直します…');
+    setTimeout(()=>location.reload(), 1200);
+  }catch(e){ setFoot('戻せませんでした: '+(e&&e.message?e.message:'')); }
 }
 
 // 最後にバックアップした日を表示（30日以上前なら注意を促す）
@@ -3821,6 +3856,11 @@ function renderBackupInfo(){
 }
 $('bkExport').addEventListener('click', exportSettings);
 $('bkImport').addEventListener('click', importSettings);
+$('bkUndo').addEventListener('click', undoRestore);
+// 戻せる状態が無いうちはボタンを目立たせない
+(function(){ const b=$('bkUndo');
+  if(b && !localStorage.getItem(UNDO_KEY)){ b.style.opacity='0.45'; }
+})();
 renderBackupInfo();
 
 render();
