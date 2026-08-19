@@ -428,7 +428,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v45 (リスト削除も取り消せるように)';
+const APP_VERSION='v47 (式での更新・エラー表示を修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1214,10 +1214,145 @@ function memTouch(ticker){
 
 /* 保存が期限切れだった場合、その保存時刻を入れて返す（0なら最新）。
    呼び出し側は「◯分前のデータです」と出すのに使う */
+/* 式（TLT/SHY など）を表示中かどうか。
+   priceDigits と render の両方から使うので、両方より前で宣言する
+   （let は巻き上げされないため、後ろに置くと起動時に例外になる） */
+let exprMode=false;
+
+/* =========================================================
+   銘柄の式（TradingView風）
+   "TLT/SHY" "US10Y-US03M" のように、複数の銘柄を計算して1本の
+   チャートにする。利回りの差（イールドカーブ）や、2銘柄の相対的な
+   強さ（RS）を1枚で見るために用意した。
+   ・使える記号は + - * / ( ) と数字
+   ・出来高は意味を持たないので0にする
+   ・使う銘柄の数だけAPIを消費する（TLT/SHYなら2回）
+   ========================================================= */
+
+function isExpr(s){ return /[+\-*/()]/.test(String(s||'').replace(/^[A-Z0-9.\-]+$/i,'')) || /[+*/()]/.test(String(s||'')); }
+function tokenize(src){
+  const raw=String(src||'').toUpperCase().trim();
+  // 「A B」のように演算子なしで並べたものは間違いとして弾く。
+  // 空白を先に消すと "AB" という1つの銘柄に見えてしまうため、消す前に確認する
+  if(/[A-Z0-9.]\s+[A-Z0-9.]/.test(raw)) throw new Error('銘柄の間に + - * / を入れてください');
+  const s=raw.replace(/\s+/g,'');
+  const out=[]; let i=0;
+  while(i<s.length){
+    const c=s[i];
+    if('+-*/()'.includes(c)){ out.push({t:c}); i++; continue; }
+    let j=i;
+    while(j<s.length && /[A-Z0-9.]/.test(s[j])) j++;
+    if(j===i) throw new Error('使えない文字があります: '+c);
+    const w=s.slice(i,j);
+    if(/^[0-9]+(\.[0-9]+)?$/.test(w)) out.push({t:'num', v:+w});
+    else out.push({t:'sym', v:w});
+    i=j;
+  }
+  return out;
+}
+function parse(src){
+  const tk=tokenize(src); let p=0;
+  const peek=()=>tk[p], eat=t=>{ if(tk[p]&&tk[p].t===t){ return tk[p++]; } return null; };
+  function expr(){
+    let n=term();
+    for(;;){ const o=peek(); if(o&&(o.t==='+'||o.t==='-')){ p++; n={op:o.t,a:n,b:term()}; } else return n; }
+  }
+  function term(){
+    let n=unary();
+    for(;;){ const o=peek(); if(o&&(o.t==='*'||o.t==='/')){ p++; n={op:o.t,a:n,b:unary()}; } else return n; }
+  }
+  function unary(){
+    if(eat('-')) return {op:'neg', a:unary()};
+    if(eat('+')) return unary();
+    return atom();
+  }
+  function atom(){
+    if(eat('(')){ const n=expr(); if(!eat(')')) throw new Error('カッコが閉じていません'); return n; }
+    const n=peek();
+    if(!n) throw new Error('式が途中で終わっています');
+    if(n.t==='num'){ p++; return {num:n.v}; }
+    if(n.t==='sym'){ p++; return {sym:n.v}; }
+    throw new Error('式が正しくありません（'+n.t+'）');
+  }
+  const n=expr();
+  if(p<tk.length) throw new Error('式が正しくありません');
+  return n;
+}
+function symbolsOf(node, out){
+  out=out||[];
+  if(!node) return out;
+  if(node.sym){ if(!out.includes(node.sym)) out.push(node.sym); return out; }
+  if(node.num!=null) return out;
+  symbolsOf(node.a,out); symbolsOf(node.b,out);
+  return out;
+}
+/* 1本ぶんの値を計算。get(sym) は数値または null を返す */
+function evalNode(node, get){
+  if(node.num!=null) return node.num;
+  if(node.sym){ const v=get(node.sym); return (v==null||!isFinite(v))?null:v; }
+  if(node.op==='neg'){ const a=evalNode(node.a,get); return a==null?null:-a; }
+  const a=evalNode(node.a,get), b=evalNode(node.b,get);
+  if(a==null||b==null) return null;
+  switch(node.op){
+    case '+': return a+b;
+    case '-': return a-b;
+    case '*': return a*b;
+    case '/': return b===0?null:a/b;
+  }
+  return null;
+}
+
+/* 入力が「式」かどうか。ハイフンだけの銘柄（BRK-B など）と区別するため、
+   実際に解析して銘柄が2つ以上ある場合のみ式とみなす */
+function looksLikeExpr(v){
+  const s=String(v||'');
+  if(!/[+*/()]/.test(s) && !/-/.test(s)) return false;
+  try{ return symbolsOf(parse(s)).length>=1 && (/[+*/()]/.test(s) || symbolsOf(parse(s)).length>=2); }
+  catch(e){ return /[+*/()]/.test(s); }   // 記号があるのに解析できない＝式の書き間違い
+}
+
+/* 式のデータを作る。各銘柄を取得し、日付をそろえて1本ずつ計算する */
+async function loadExpr(src, step){
+  const node=parse(src);
+  const syms=symbolsOf(node);
+  if(!syms.length) throw new Error('銘柄がありません');
+  if(syms.length>4) throw new Error('銘柄は4つまでにしてください（API回数の節約のため）');
+  const data={};
+  for(const t of syms) data[t]=await loadData(t, step);   // 1つずつ（レート制限を守る）
+
+  // いちばん本数の多い銘柄を基準に日付をそろえる
+  let base=null;
+  syms.forEach(t=>{ if(!base || data[t].candles.length>data[base].candles.length) base=t; });
+  const maps={};
+  syms.forEach(t=>{ const m={}; data[t].candles.forEach(c=>{ m[String(c.time)]=c; }); maps[t]=m; });
+
+  const candles=[], volumes=[];
+  data[base].candles.forEach(bc=>{
+    const key=String(bc.time);
+    const pick=f=>{
+      const get=t=>{ const c=maps[t][key]; return c? c[f] : null; };
+      return evalNode(node, get);
+    };
+    const o=pick('open'), h=pick('high'), l=pick('low'), c=pick('close');
+    if(o==null||h==null||l==null||c==null) return;     // 揃わない日は飛ばす
+    // 割り算や引き算では高値と安値が入れ替わることがあるので、必ず並べ直す
+    const hi=Math.max(o,h,l,c), lo=Math.min(o,h,l,c);
+    candles.push({time:bc.time, open:o, high:hi, low:lo, close:c});
+    volumes.push({time:bc.time, value:0});             // 出来高は意味を持たない
+  });
+  if(!candles.length) throw new Error('共通する日付がありませんでした');
+  return pack({candles, volumes});
+}
+
 async function loadData(ticker, step){
   const memKey=ticker+'@'+step;
   memTouch(ticker);
   if(realCache[memKey]) return realCache[memKey];
+  // 「TLT/SHY」のような式は、各銘柄を取ってから計算する
+  if(looksLikeExpr(ticker)){
+    const p=await loadExpr(ticker, step); p._staleAt=0;
+    return realCache[memKey]=p;
+  }
 
   const kind = step==='65m' ? '65m' : '1d';
 
@@ -1424,6 +1559,7 @@ async function render(){
   const my=++renderToken;                    // この呼び出しの番号札
   const cacheKey=current.ticker+'@'+current.step;
   const ticker=current.ticker, step=current.step;
+  exprMode = looksLikeExpr(ticker);      // 桁数の切り替えに使う
   $('hdrTicker').textContent=ticker;
   $('hdrFav').style.display=isFav(ticker)?'inline':'none';
   store.set('mychart-last', ticker);
@@ -1460,6 +1596,7 @@ async function render(){
       // 画面を見ても何を直せばよいか判断できなかった
       if(err.kind==='api')        setMode('sample','APIエラー: '+err.message+'（サンプル表示）');
       else if(err.kind==='nokey') setMode('sample');   // キー未設定はエラーではない
+      else if(looksLikeExpr(ticker)) setMode('sample','式「'+escHtml(ticker)+'」を計算できませんでした: '+(err&&err.message?err.message:''));
       else if(err && err.message) setMode('sample','取得に失敗しました: '+err.message+'（サンプル表示）');
       else                        setMode('sample','取得に失敗しました（通信状況をご確認ください）→ サンプル表示');
     }finally{
@@ -1521,9 +1658,13 @@ function layoutPanes(chartObj, el){
 /* 価格の表示桁数を、その価格帯に合わせて自動で変える。
    低位株を小数2桁で丸めると 0.0234 も 0.0218 も「0.02」になり、
    損切りと利確の区別がつかなくなるため */
+/* 式（TLT/SHY など）を見ている間は、小数の桁を増やす。
+   比率は1.0976→1.1023のように小さくしか動かないため、株価と同じ2桁だと
+   数日ぶんが全部「1.10」に潰れて動きが読めなくなる */
 function priceDigits(p){
   const a=Math.abs(p||0);
-  if(!a) return 2;                       // 0や未取得は通常の2桁
+  if(!a) return exprMode ? 4 : 2;        // 0や未取得
+  if(exprMode) return a>=100 ? 2 : a>=1 ? 4 : a>=0.01 ? 5 : 6;
   return a>=1 ? 2 : a>=0.1 ? 3 : a>=0.01 ? 4 : 6;
 }
 function fmtPrice(p){ return (p==null||!isFinite(p)) ? '-' : p.toFixed(priceDigits(p)); }
@@ -3391,12 +3532,24 @@ function toggleFav(t){ favs=isFav(t)?favs.filter(x=>x!==t):[...favs,t]; store.se
 
 /* --- ティッカー検索（TradingViewの検索窓のような機能） --- */
 // 入力を大文字だけに整える（AAPL, BRK.B などを許可）
-function cleanTicker(v){ return (v||'').trim().toUpperCase().replace(/[^A-Z0-9.\-]/g,''); }
+/* 式（TLT/SHY など）も入れられるよう、+ - * / ( ) と空白は残す。
+   ふつうの銘柄なら今までどおり記号が落ちる */
+function cleanTicker(v){
+  const s=(v||'').trim().toUpperCase().replace(/[^A-Z0-9.\-+*/() ]/g,'');
+  return (/[+*/()]/.test(s) || /[A-Z0-9.]\s*-\s*[A-Z0-9.]/.test(s)) ? s.replace(/\s+/g,'') : s.replace(/[^A-Z0-9.\-]/g,'');
+}
 // カンマ区切りの入力を「銘柄の一覧」に分解する
 // 例: "AAPL, NVDA，SOXX" → ["AAPL","NVDA","SOXX"]
 // 半角カンマ・全角カンマ・読点・空白のどれで区切ってもOK。重複は自動で除く
 function parseTickers(v){
-  return (v||'').split(/[,、，\s]+/)
+  // 式（記号を含む）はそのまま1件として扱う。空白で切ると壊れるため
+  const raw=String(v||'');
+  // 式なら丸ごと1件。"US10Y - US03M" のようにハイフンだけの式も拾う
+  if(/[+*/()]/.test(raw) || looksLikeExpr(raw)){
+    const one=cleanTicker(raw);
+    return one ? [one] : [];
+  }
+  return raw.split(/[,、，\s]+/)
     .map(cleanTicker)
     .filter((t,i,arr)=> t && arr.indexOf(t)===i);
 }
@@ -3603,8 +3756,18 @@ async function refreshNow(){
   const btn=$('refreshBtn');
   if(btn.classList.contains('busy')) return;   // 連打防止
   btn.classList.add('busy');
-  const targets=[current.ticker];
-  if(layoutMode!=='1' && c2.ticker && !targets.includes(c2.ticker)) targets.push(c2.ticker);
+  /* 式（TLT/SHY など）は、それ自体にAPIのデータが無く、
+     元になる銘柄から計算している。元を消さないと更新されないため広げる */
+  const expand=t=>{
+    const out=[t];
+    if(looksLikeExpr(t)){
+      try{ symbolsOf(parse(t)).forEach(x=>{ if(!out.includes(x)) out.push(x); }); }catch(e){}
+    }
+    return out;
+  };
+  const targets=[];
+  expand(current.ticker).forEach(t=>{ if(!targets.includes(t)) targets.push(t); });
+  if(layoutMode!=='1' && c2.ticker) expand(c2.ticker).forEach(t=>{ if(!targets.includes(t)) targets.push(t); });
   // メモリと端末の保存から、対象銘柄ぶんだけ削除
   Object.keys(htfFailed).forEach(k=>delete htfFailed[k]);   // 失敗の記録を消して再挑戦できるように
   for(const t of targets){
