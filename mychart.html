@@ -219,6 +219,32 @@
     border-radius:6px; padding:8px 10px; font-size:14px; }
   .dsRow input[type=color] { flex:1; height:40px; padding:2px; background:#0e1117; border:1px solid var(--line); border-radius:6px; }
   #ipCode { background:#2a3242 !important; color:var(--text) !important; }
+
+/* Floating drawing palette */
+.tools{position:fixed;z-index:15;left:12px;top:55%;padding:4px;gap:0;border:1px solid #394356;border-radius:12px;background:#19212e;box-shadow:0 4px 18px #0006;overflow:visible;max-width:calc(100vw - 16px);touch-action:none}
+.tools button{width:40px;height:42px;padding:8px;border:0;background:transparent;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.tools svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+#barGrip{width:26px;color:#8b96a8;cursor:grab}#barGrip:active{cursor:grabbing}.tools button:focus-visible{outline:2px solid #81afff}
+#barMorePanel{display:none;position:absolute;left:0;bottom:calc(100% + 8px);width:min(310px,calc(100vw - 24px));max-height:45vh;overflow:auto;background:#19212e;border:1px solid #394356;border-radius:12px;padding:10px;box-shadow:0 4px 18px #0006;white-space:normal;touch-action:pan-y}
+.tools.more-open #barMorePanel{display:flex;flex-wrap:wrap;gap:5px}#barMorePanel button{width:auto;min-width:44px;font-size:12px;background:#222e40}#barMorePanel label{display:flex;align-items:center;gap:8px;width:100%;font-size:12px;padding:5px 0}#barMorePanel input[type=range]{width:145px}#barMorePanel input[type=color]{height:40px;width:44px}
+@media(max-width:350px){.tools button{width:36px}#barGrip{width:22px}}
+
+
+/* v53: contextual controls preserve the chart's dimensions. */
+#polyActions{position:absolute;top:56px;left:8px;z-index:15;display:flex;align-items:center;gap:4px;padding:4px;background:#19212ef5;border:1px solid #394356;border-radius:8px;max-width:calc(100% - 16px)}
+#polyActions[hidden]{display:none}
+#polyActions button{min-height:44px;padding:6px 12px;background:transparent;color:#d1d4dc;border:0;border-radius:5px;font-size:14px}
+#polyActions #polyDone{background:#2962ff;color:white}
+#polyActions button:disabled{opacity:.4}
+#polyCount{font-size:14px;padding:0 6px;color:#a8b3c5}
+#selectionActions button{min-height:44px!important;font-size:14px!important;padding:6px 8px!important}
+/* v52 quiet controls and contextual editing */
+header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-btn{font-size:17px}#penBtn,#refreshBtn,#maxBtn,#layoutBtn,.gear{min-width:32px;min-height:36px;margin-left:1px;padding:6px;border:0;background:transparent}header svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.tf button{min-height:36px;font-size:13px}.legend{font-size:12px;line-height:1.5}#indChips{top:52px;max-width:66%}#indTable{top:52px;max-width:32%;font-size:11px}#indTable td{max-width:100px;overflow:hidden;text-overflow:ellipsis}
+#selectionActions{position:absolute;bottom:34px;left:8px;z-index:9;display:flex;gap:5px;padding:4px;background:#19212eed;border:1px solid #394356;border-radius:8px}#selectionActions[hidden]{display:none}#selectionActions button{min-height:36px;padding:6px 10px;color:#d1d4dc;background:transparent;border:0;font-size:12px}#selectionActions button:last-child{color:#ef5350}
+#latestBtn{position:absolute;right:70px;bottom:30px;z-index:8;border:1px solid #394356;border-radius:7px;background:#19212ee6;color:#d1d4dc;padding:7px 9px;font-size:12px;min-height:34px}
+@media(hover:hover){button:hover{filter:brightness(1.25);background-color:#263247}button:focus-visible{outline:2px solid #81afff}}
+
 </style>
 </head>
 <body>
@@ -283,7 +309,7 @@
         <span class="item">H<b id="lg-h">-</b></span>
         <span class="item">L<b id="lg-l">-</b></span>
         <span class="item">C<b id="lg-c">-</b></span>
-        <span class="item">前日比<b id="lg-chg">-</b></span>
+        <span class="item"><span id="changeLabel">前の足比</span><b id="lg-chg">-</b></span>
         <span class="item">出来高<b id="lg-vol">-</b></span>
       </div>
     <table id="indTable"></table>
@@ -428,7 +454,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v47 (式での更新・エラー表示を修正)';
+const APP_VERSION='v53 (折線・描画編集の改善)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1485,7 +1511,18 @@ let lastSyncKey='';
    計算され、画面の端に張り付いてしまうため、しばらく置き直し続ける */
 let relayoutFrames=0;
 
+let displayedViewKey=null;
+const viewMemory=new Map();
+function rememberView(){
+ if(!displayedViewKey||epochs.length<2)return;
+ const r=chart.timeScale().getVisibleLogicalRange();if(!r)return;
+ const a=logicalToTs(r.from),b=logicalToTs(r.to);
+ if(Number.isFinite(a)&&Number.isFinite(b)){viewMemory.delete(displayedViewKey);viewMemory.set(displayedViewKey,{a,b});while(viewMemory.size>40)viewMemory.delete(viewMemory.keys().next().value);}
+}
 function draw(d){
+  rememberView();
+  const nextViewKey=current.ticker+'@'+current.step;
+  const savedView=viewMemory.get(nextViewKey);
   candleSeries.setData(d.candles); volumeSeries.setData(d.vols);
   // 出来高の移動平均線を計算して重ねる
   const vma=ta.sma(d.vols.map(v=>v.value), VOL_MA_LEN);
@@ -1509,8 +1546,10 @@ function draw(d){
   // データが長い時は「直近250本」だけ表示して開始（左にスクロールすると過去までさかのぼれる）
   // データが長い時は「画面に収まる本数」だけ表示して開始（左にスクロールすると過去までさかのぼれる）
   const n=d.candles.length, show=initialBars($('chart'));
-  if(n>show+20) chart.timeScale().setVisibleLogicalRange({from:n-show, to:n+3});
+  if(savedView&&epochs.length>1){chart.timeScale().setVisibleLogicalRange({from:tsToLogical(savedView.a),to:tsToLogical(savedView.b)});}
+  else if(n>show+20) chart.timeScale().setVisibleLogicalRange({from:n-show, to:n+3});
   else chart.timeScale().fitContent();
+  displayedViewKey=nextViewKey;
   lastCandle=d.candles[d.candles.length-1]||null; lastVol=d.vols[d.vols.length-1]||null;
   updateLegend(lastCandle,lastVol);
   redrawOverlay();
@@ -1631,13 +1670,15 @@ function fmtVol(n){
    BAR_PX を大きくするとローソクが太く（表示本数が減り）、小さくすると細くなる */
 const BAR_PX = 5.5;
 function initialBars(el){
-  const w=(el||$('chart')).clientWidth || 360;
+  const box=el||$('chart');let axis=60;try{axis=(box.id==='chart2'&&chart2?chart2:chart).priceScale('right').width()||60;}catch(e){}
+  const w=Math.max(100,(box.clientWidth||360)-axis);
   return Math.max(30, Math.min(400, Math.round(w / BAR_PX)));
 }
 /* 枠の高さを配分する。
    0=価格 / 1=出来高 / 2以降=自作インジ。
    固定の割合だと、インジの枠が増えた時に入る隙間がなくなって崩れるため、
    枠の数に応じて配分し直す */
+let panePrefs=store.get('mychart-pane-view',{volume:0.18,sub:0.12,compact:false});
 function layoutPanes(chartObj, el){
   const c=chartObj||chart, box=el||$('chart');
   try{
@@ -1646,8 +1687,8 @@ function layoutPanes(chartObj, el){
     const total=box.clientHeight;
     if(!total) return;
     const indCount=Math.max(0, panes.length-2);          // 自作インジの枠の数
-    const volShare=0.22;
-    const indShare=indCount ? Math.min(0.18, (1-volShare-0.35)/indCount) : 0;
+    const volShare=panePrefs.compact?0.06:Math.max(.06,Math.min(.3,Number(panePrefs.volume)||.18));
+    const indShare=indCount ? Math.min(panePrefs.compact?.04:Math.max(.06,Math.min(.18,Number(panePrefs.sub)||.12)), (1-volShare-0.45)/indCount) : 0;
     const priceShare=1 - volShare - indShare*indCount;
     panes[0].setHeight(Math.round(total*priceShare));
     panes[1].setHeight(Math.round(total*volShare));
@@ -1704,6 +1745,7 @@ function fmtVolPrecise(n){
 }
 function updateLegend(c,v){
   if(!c) return;
+  $('changeLabel').textContent=({'1d':'前日比','1w':'前週比','1M':'前月比','3M':'前3ヶ月比','6M':'前6ヶ月比'})[current.step]||'前の足比';
   $('lg-date').textContent=barLabel(c.time);
   $('lg-o').textContent=fmtPrice(c.open); $('lg-h').textContent=fmtPrice(c.high);
   $('lg-l').textContent=fmtPrice(c.low);  $('lg-c').textContent=fmtPrice(c.close);
@@ -1942,6 +1984,9 @@ const ta = {
    書いたコードは端末に保存され、銘柄・時間足を変えても自動で再計算される
    ========================================================= */
 let indicators = store.get('custom-inds', []);   // 保存済みの自作インジ一覧
+let vpView=store.get('mychart-vp-view',{width:0.18,opacity:0.35,hidden:false});
+vpView={width:Math.max(.1,Math.min(.4,Number(vpView?.width)||.18)),opacity:Math.max(.1,Math.min(1,Number(vpView?.opacity)||.35)),hidden:!!vpView?.hidden};
+let axisLines=[],axisSignature='';
 let customSeries = [];                            // いま画面に出している線
 let customMarkers = null;                         // いま画面に出している矢印
 let editingId = null;                             // 編集中のインジのID
@@ -2230,7 +2275,8 @@ function drawIndShapes(){
       return;
     }
     if(sh.type==='hbars'){
-      const maxV=sh.maxValue||1, maxW=w*(sh.widthPct||0.35);
+      if(vpView.hidden)return;
+      const maxV=sh.maxValue||1, maxW=w*Math.min(sh.widthPct||0.35,vpView.width);
       sh.bins.forEach(b=>{
         // pHigh/pLow が本来の名前。priceHigh/priceLow と書かれていても受け付ける
         const bHi = b.pHigh!=null ? b.pHigh : b.priceHigh;
@@ -2239,13 +2285,14 @@ function drawIndShapes(){
         if(y1==null||y2==null) return;
         const bw=(b.value/maxV)*maxW;
         svg.appendChild(el('rect',{ x:w-bw, y:Math.min(y1,y2), width:Math.max(0,bw),
-          height:Math.max(1,Math.abs(y2-y1)-1), fill:b.color, style:'pointer-events:none' }));
+          height:Math.max(1,Math.abs(y2-y1)-1), fill:b.color, opacity:vpView.opacity, style:'pointer-events:none' }));
       });
     } else if(sh.type==='hline'){
       hlineList.push(sh);   // まとめて描くので、いったん集めておく
     }
   });
   drawGroupedHlines(svg, hlineList, w);
+  syncAxisLabels();
 }
 
 /* 水平線をまとめて描く。
@@ -2648,6 +2695,7 @@ function normalizeIds(list){
 }
 
 function doUndo(){
+  if(tool==='poly'&&pendingPoly&&pendingPoly.length){backPoly();return;}
   if(!undoStack.length){ setFoot('戻せる操作がありません'); return; }
   try{
     drawings=JSON.parse(undoStack.pop());
@@ -2672,12 +2720,13 @@ function loadDrawings(){
   selected=null; hideDelBtn();
 }
 function showDelBtn(){
+  if($('selectionActions'))$('selectionActions').hidden=false;
   $('delOneBtn').style.display='inline-block'; $('styleBtn').style.display='inline-block';
   // ツールの段を隠している時に線をタップすると「線の設定」「選択を削除」が
   // 見えない場所に出てしまうので、その時だけ自動で開く
   try{ if(!toolsOpen) setToolsOpen(true); }catch(e){}
 }
-function hideDelBtn(){ $('delOneBtn').style.display='none'; $('styleBtn').style.display='none'; }
+function hideDelBtn(){ $('delOneBtn').style.display='none'; $('styleBtn').style.display='none'; if($('selectionActions'))$('selectionActions').hidden=true; }
 // 指/マウスの位置を、チャート左上からのピクセルに直す
 function pos(e){ const r=svg.getBoundingClientRect(); return { x:e.clientX-r.left, y:e.clientY-r.top }; }
 // SVG部品を作る小道具
@@ -2750,7 +2799,7 @@ function buildOne(d){
     svg.appendChild(parts.hit); svg.appendChild(parts.vis);
     parts.vh=[]; parts.vv=[];
     d.pts.forEach((_,vi)=>{
-      const h=el('circle',{r:14,fill:'transparent','data-id':d.id,'data-role':'v','data-vi':vi,style:'pointer-events:all;cursor:pointer;touch-action:none'});
+      const h=el('circle',{r:22,fill:'transparent','data-id':d.id,'data-role':'v','data-vi':vi,style:'pointer-events:all;cursor:pointer;touch-action:none'});
       const v=el('circle',{r:6,fill:'#0e1117',stroke:d.color,'stroke-width':2,style:'pointer-events:none'});
       svg.appendChild(h); svg.appendChild(v);
       parts.vh.push(h); parts.vv.push(v);
@@ -2787,9 +2836,9 @@ function buildOne(d){
 }
 // 端点の丸ハンドル（見えない大きめの円=当たり判定 と 見た目の丸）
 function addHandles(parts, d){
-  parts.hitA=el('circle',{r:16,fill:'transparent','data-id':d.id,'data-role':'a',style:'pointer-events:all;cursor:pointer;touch-action:none'});
+  parts.hitA=el('circle',{r:22,fill:'transparent','data-id':d.id,'data-role':'a',style:'pointer-events:all;cursor:pointer;touch-action:none'});
   parts.visA=el('circle',{r:8,fill:'#0e1117',stroke:d.color,'stroke-width':2,style:'pointer-events:none'});
-  parts.hitB=el('circle',{r:16,fill:'transparent','data-id':d.id,'data-role':'b',style:'pointer-events:all;cursor:pointer;touch-action:none'});
+  parts.hitB=el('circle',{r:22,fill:'transparent','data-id':d.id,'data-role':'b',style:'pointer-events:all;cursor:pointer;touch-action:none'});
   parts.visB=el('circle',{r:8,fill:'#0e1117',stroke:d.color,'stroke-width':2,style:'pointer-events:none'});
   svg.appendChild(parts.hitA); svg.appendChild(parts.visA);
   svg.appendChild(parts.hitB); svg.appendChild(parts.visB);
@@ -2800,6 +2849,13 @@ function addHandles(parts, d){
 function dashOf(st){ return st==='dashed' ? '8,5' : st==='dotted' ? '2,5' : 'none'; }
 
 function layoutOne(d){
+ layoutOneGeometry(d);
+ const parts=elMap[d.id];if(!parts)return;
+ const on=d.id===selected||d.id===0;
+ for(const k of ['hitA','visA','hitB','visB'])if(parts[k])parts[k].style.display=on?'':'none';
+ for(const k of ['vh','vv'])if(parts[k])parts[k].forEach(n=>n.style.display=on?'':'none');
+}
+function layoutOneGeometry(d){
   const parts=elMap[d.id]; if(!parts) return;
   if(d.type==='hline'){
     const y=Py(d.price);
@@ -2833,6 +2889,8 @@ function layoutOne(d){
     coords.forEach((c,vi)=>{
       if(parts.vh[vi]) setPos(parts.vh[vi],{cx:c.x, cy:c.y});
       if(parts.vv[vi]) setPos(parts.vv[vi],{cx:c.x, cy:c.y});
+      if(parts.vh[vi]) parts.vh[vi].style.display=selected===d.id?'':'none';
+      if(parts.vv[vi]) parts.vv[vi].style.display=selected===d.id?'':'none';
     });
     return;
   }
@@ -2901,9 +2959,9 @@ function layoutOne(d){
     for(let k=0;k<B;k++){
       const pLo=v.lo+(v.hi-v.lo)*k/B, pHi=v.lo+(v.hi-v.lo)*(k+1)/B;
       const y1=Py(pHi), y2=Py(pLo);
-      const w=(v.vols[k]/v.maxV)*wAll*0.95;
+      const w=(v.vols[k]/v.maxV)*Math.min(wAll*0.95,plotAreaWidth()*vpView.width);
       setPos(parts.bars[k],{ x:xL, y:Math.min(y1,y2), width:Math.max(0,w), height:Math.max(1,Math.abs(y2-y1)-1),
-        fill: k===v.poc ? 'rgba(245,166,35,0.55)' : 'rgba(100,181,246,0.35)' });
+        opacity:vpView.hidden?0:vpView.opacity, fill: k===v.poc ? '#f5a623' : '#64b5f6' });
     }
     // ハンドルは枠の左右の中央に
     const yMid=(yTop+yBot)/2;
@@ -2985,6 +3043,7 @@ function layoutOverlay(){
   drawings.forEach(d=>{ try{ layoutOne(d); }catch(e){ setFoot('描画エラー('+d.type+'): '+e.message); } });
   if(creating){ try{ layoutOne(creating); }catch(e){ setFoot('描画エラー: '+e.message); } }
   layoutPending();
+  syncAxisLabels();
 }
 
 /* ---------------------------------------------------------
@@ -2993,6 +3052,19 @@ function layoutOverlay(){
    --------------------------------------------------------- */
 let pendingPoint=null;                                   // タップ2回方式の1点目
 let pendingPoly=null;                                    // 折線の作成途中の点たち
+function syncPolyActions(){
+  const bar=$('polyActions'); if(!bar)return;
+  bar.hidden=tool!=='poly';
+  const n=pendingPoly?pendingPoly.length:0;
+  $('polyCount').textContent=n+'点';
+  $('polyDone').disabled=n<2;
+  $('polyBack').disabled=n===0;
+}
+function backPoly(){
+  if(pendingPoly&&pendingPoly.length)pendingPoly.pop();
+  syncPolyActions();redrawOverlay();
+}
+function cancelPoly(){pendingPoly=null;setTool(null);setFoot('折線の作成を取り消しました');}
 let creating=null, createStart=null, createMoved=false;  // 引っぱり中のプレビュー
 
 // 計測の途中経過（+3.2% / 値幅 / 本数）を作る
@@ -3055,7 +3127,8 @@ $('catcher').addEventListener('pointerdown', e=>{
     // 折線: タップするたびに点を追加。確定はツールボタンをもう一度押す
     pendingPoly=pendingPoly||[];
     pendingPoly.push({t, p:price});
-    setFoot('点 '+pendingPoly.length+'個。「〰 折線」をもう一度押すと確定');
+    syncPolyActions();
+    setFoot('点 '+pendingPoly.length+'個。続けてタップ、描き終えたら「完了」');
     redrawOverlay(); return;
   }
   if(pendingPoint){
@@ -3127,7 +3200,7 @@ svg.addEventListener('pointerdown', e=>{
   // 動かす前の状態を控える（実際に動いた時だけ履歴に入れる。下のendPointer参照）
   dragUndoSnapshot=JSON.stringify(drawings.map(x=>{ const c={...x}; delete c._vp; return c; }));
   dragMoved=false;
-  selected=d.id; showDelBtn();
+  selected=d.id; showDelBtn(); layoutOverlay();
   // 太さは変えず、下のバーの文字で「選択中」を知らせる
   const names={hline:'水平線', rect:'計測ボックス', trend:'トレンドライン', arrow:'矢印', poly:'折線', pos:'損益ツール', vp:'価格帯別出来高'};
   setFoot((d.type==='hline' ? '水平線 '+fmtPrice(d.price) : names[d.type]||'図形')
@@ -3232,6 +3305,7 @@ window.addEventListener('touchmove', e=>{ if(drag||creating) e.preventDefault();
 function setTool(t){
   commitPoly();   // 折線を作成中なら、ツールを離れる前に確定する
   tool=t; pendingPoint=null; creating=null; createStart=null;
+  selected=null;hideDelBtn();syncPolyActions();layoutOverlay();
   document.querySelectorAll('#toolbar button[data-tool]').forEach(x=>x.classList.toggle('active', x.dataset.tool===t));
   $('catcher').style.display = t ? 'block' : 'none';   // ツール中だけ受け皿を出す
   const hints={
@@ -3240,7 +3314,7 @@ function setTool(t){
     rect:'引っぱって囲む（タップ2回でもOK）',
     au:'矢印を置きたい所をタップ（押したままズラして微調整もOK）',
     ad:'矢印を置きたい所をタップ（押したままズラして微調整もOK）',
-    poly:'タップで点を追加 → ボタンをもう一度押すと確定',
+    poly:'タップで点を追加。「1点戻す」で修正、描き終えたら「完了」',
     pos:'エントリー価格の所をタップ（利確+14% / 損切-7%で作成。後で端をドラッグして調整）',
     vp:'調べたい期間を引っぱって囲む（タップ2回でもOK）',
   };
@@ -3256,6 +3330,7 @@ function commitPoly(){
     setFoot('折線を追加（点を掴んで動かせます）');
   }
   pendingPoly=null;
+  syncPolyActions();
   redrawOverlay();
 }
 function clearDrawings(){ drawings=[]; drag=null; pendingPoint=null; pendingPoly=null; creating=null; createStart=null; selected=null; hideDelBtn(); saveDrawings(); redrawOverlay(); }
@@ -3299,7 +3374,7 @@ $('toolbar').addEventListener('click', e=>{
     selected=null; hideDelBtn(); saveDrawings(); redrawOverlay();
     setFoot('選択した描画を削除しました'); return;
   }
-  if(b.dataset.tool) setTool(tool===b.dataset.tool ? null : b.dataset.tool);
+  if(b.dataset.tool){$('toolbar').classList.remove('more-open');const m=$('toolbar').querySelector('button[aria-expanded]');if(m)m.setAttribute('aria-expanded','false');setTool(tool===b.dataset.tool ? null : b.dataset.tool);}
 });
 $('colorPick').addEventListener('input', e=>{ drawColor=e.target.value; });
 
@@ -3889,7 +3964,7 @@ if(navigator.storage && navigator.storage.persist){
 const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-last',
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
   'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
-  'mychart-logscale','mychart-tools-open','mychart-api-count','mychart-magnet','mychart-api-times'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
+  'mychart-logscale','mychart-tools-open','mychart-api-count','mychart-magnet','mychart-api-times','mychart-bar-position','mychart-vp-view','mychart-bar-tools','mychart-pane-view'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
 function buildBackup(includeKey){
@@ -4025,6 +4100,66 @@ $('bkUndo').addEventListener('click', undoRestore);
   if(b && !localStorage.getItem(UNDO_KEY)){ b.style.opacity='0.45'; }
 })();
 renderBackupInfo();
+
+function syncAxisLabels(){
+  const levels=[...drawings.filter(d=>d.type==='hline').map(d=>({price:d.price,color:d.color})),...indShapes.filter(d=>d.type==='hline')];
+  const unique=new Map();levels.forEach(d=>{if(Number.isFinite(d.price))unique.set(fmtPrice(d.price),d);});
+  const rows=[...unique.values()].slice(0,80),sig=JSON.stringify(rows.map(d=>[d.price,d.color]));if(sig===axisSignature)return;
+  axisLines.forEach(l=>candleSeries.removePriceLine(l));axisLines=[];axisSignature=sig;
+  rows.forEach(d=>axisLines.push(candleSeries.createPriceLine({price:d.price,color:d.color||'#8299b7',lineVisible:false,axisLabelVisible:true,title:''})));
+}
+(function floatingPalette(){
+ const bar=$('toolbar'),icon=p=>'<svg viewBox="0 0 24 24" aria-hidden="true">'+p+'</svg>';
+ const grip=document.createElement('button');grip.id='barGrip';grip.title='ドラッグで移動（矢印キーでも移動）';grip.setAttribute('aria-label',grip.title);grip.innerHTML=icon('<path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01" stroke-width="3"/>');bar.prepend(grip);
+ const more=document.createElement('div');more.id='barMorePanel';
+ const primary={hline:['水平線','<path d="M2 12h20"/><circle cx="12" cy="12" r="2"/>'],trend:['トレンドライン','<path d="m5 19 14-14"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/>'],au:['上矢印','<path d="m12 3-8 9h5v9h6v-9h5Z"/>'],ad:['下矢印','<path d="m12 21-8-9h5V3h6v9h5Z"/>'],rect:['計測ボックス','<rect x="3" y="5" width="18" height="14"/><path d="M7 5v4m5-4v3m5-3v4"/>'],poly:['折線','<path d="m3 17 6-9 6 5 6-10"/>'],pos:['損益','<path d="M4 4h16M4 12h16M4 20h16M12 4v16m-3-13 3-3 3 3"/>'],vp:['出来高P','<path d="M4 3v18M4 5h15v4H4m0 2h9v4H4m0 2h18v4H4"/>']};
+ const toolButtons=new Map([...bar.querySelectorAll('button[data-tool]')].map(b=>[b.dataset.tool,b]));
+ let barTools=store.get('mychart-bar-tools',['hline','trend','au','ad']);
+ barTools=Array.isArray(barTools)?[...new Set(barTools)].filter(k=>toolButtons.has(k)).slice(0,4):['hline','trend','au','ad'];
+ [...bar.children].forEach(b=>{if(b===grip)return;if(b.id==='undoBtn'){b.innerHTML=icon('<path d="M9 5 3 11l6 6M3 11h11a6 6 0 0 1 6 6"/>');b.title='戻す';b.setAttribute('aria-label','戻す');}else more.appendChild(b);});
+ const renderTools=()=>{toolButtons.forEach((b,key)=>{b.textContent=primary[key][0];b.title=primary[key][0];b.setAttribute('aria-label',primary[key][0]);more.prepend(b);});barTools.forEach(key=>{const b=toolButtons.get(key);b.innerHTML=icon(primary[key][1]);bar.insertBefore(b,$('undoBtn'));});};
+ renderTools();
+ const menu=document.createElement('button');menu.innerHTML=icon('<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/>');menu.title='その他の道具・出来高P設定';menu.setAttribute('aria-label',menu.title);menu.setAttribute('aria-expanded','false');bar.appendChild(menu);bar.appendChild(more);
+ const hide=document.createElement('button');hide.innerHTML=icon('<path d="m6 6 12 12M18 6 6 18"/>');hide.title='バーを閉じる';hide.setAttribute('aria-label',hide.title);bar.insertBefore(hide,more);hide.onclick=()=>setToolsOpen(false);
+ const width=document.createElement('label');width.innerHTML='出来高P 幅 <input type="range" min="10" max="40" step="1" aria-label="出来高Pの幅"><output></output>';more.appendChild(width);
+ const alpha=document.createElement('label');alpha.innerHTML='濃さ <input type="range" min="10" max="100" step="5" aria-label="出来高Pの濃さ"><output></output>';more.appendChild(alpha);
+ [[width,'width'],[alpha,'opacity']].forEach(([node,key])=>{const r=node.querySelector('input'),o=node.querySelector('output');r.value=Math.round(vpView[key]*100);o.textContent=r.value+'%';r.oninput=()=>{vpView[key]=r.value/100;o.textContent=r.value+'%';drawIndShapes();layoutOverlay();};r.onchange=()=>store.set('mychart-vp-view',vpView);});
+ const toggle=document.createElement('button');const label=()=>toggle.textContent=vpView.hidden?'出来高Pを表示':'出来高Pを隠す';label();toggle.onclick=()=>{vpView.hidden=!vpView.hidden;store.set('mychart-vp-view',vpView);label();drawIndShapes();layoutOverlay();};more.appendChild(toggle);
+ let saved=store.get('mychart-bar-position',null),moving=null;
+ const bounds=()=>({w:window.innerWidth,h:window.innerHeight});
+ const place=(x,y,persist=false)=>{const b=bounds();x=Math.max(8,Math.min(b.w-bar.offsetWidth-8,Number(x)||8));y=Math.max(8,Math.min(b.h-bar.offsetHeight-8,Number(y)||8));bar.style.left=x+'px';bar.style.top=y+'px';if(persist){saved={x:x/Math.max(1,b.w-bar.offsetWidth),y:y/Math.max(1,b.h-bar.offsetHeight)};store.set('mychart-bar-position',saved);}more.style.bottom=y>window.innerHeight/2?'calc(100% + 8px)':'auto';more.style.top=y>window.innerHeight/2?'auto':'calc(100% + 8px)';};
+ const restore=()=>{if(!bar.offsetWidth)return;const b=bounds();place(saved?saved.x*(b.w-bar.offsetWidth):(b.w-bar.offsetWidth)/2,saved?saved.y*(b.h-bar.offsetHeight):b.h*.62);};
+ const edit=document.createElement('details');edit.style.cssText='width:100%;border-top:1px solid #394356;padding-top:8px';
+ const summary=document.createElement('summary');summary.textContent='バーのツールを変更';summary.style.cssText='padding:10px 0;cursor:pointer;font-size:13px';edit.appendChild(summary);more.appendChild(edit);
+ const choices=[];
+ for(let slot=0;slot<4;slot++){const row=document.createElement('label');row.textContent=(slot+1)+'番目';const select=document.createElement('select');select.setAttribute('aria-label','バーの'+(slot+1)+'番目');select.style.cssText='min-height:40px;flex:1;min-width:0;background:#222e40;color:#d1d4dc;border:1px solid #394356;border-radius:6px;font-size:16px';
+ const empty=document.createElement('option');empty.value='';empty.textContent='表示しない';select.appendChild(empty);Object.entries(primary).forEach(([key,spec])=>{const op=document.createElement('option');op.value=key;op.textContent=spec[0];select.appendChild(op);});select.value=barTools[slot]||'';row.appendChild(select);edit.appendChild(row);choices.push(select);
+ select.onchange=()=>{const next=choices.map(x=>x.value),key=next[slot],old=barTools[slot]||'';if(key){const other=next.findIndex((v,i)=>i!==slot&&v===key);if(other>=0)next[other]=old;}barTools=next.filter(Boolean);store.set('mychart-bar-tools',barTools);choices.forEach((x,i)=>x.value=barTools[i]||'');renderTools();restore();};}
+ menu.onclick=()=>{const on=bar.classList.toggle('more-open');menu.setAttribute('aria-expanded',String(on));restore();};
+ grip.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();e.stopPropagation();moving={id:e.pointerId,x:e.clientX,y:e.clientY,left:bar.offsetLeft,top:bar.offsetTop};grip.setPointerCapture(e.pointerId);};
+ grip.onpointermove=e=>{if(!moving||moving.id!==e.pointerId)return;e.preventDefault();e.stopPropagation();place(moving.left+e.clientX-moving.x,moving.top+e.clientY-moving.y);};
+ const end=e=>{if(!moving||moving.id!==e.pointerId)return;e.stopPropagation();place(bar.offsetLeft,bar.offsetTop,true);moving=null;};grip.onpointerup=end;grip.onpointercancel=end;
+ grip.onkeydown=e=>{const ds={ArrowLeft:[-10,0],ArrowRight:[10,0],ArrowUp:[0,-10],ArrowDown:[0,10]};if(ds[e.key]){e.preventDefault();place(bar.offsetLeft+ds[e.key][0],bar.offsetTop+ds[e.key][1],true);}};
+ new MutationObserver(()=>{if(!document.body.classList.contains('tools-open')){bar.classList.remove('more-open');menu.setAttribute('aria-expanded','false');}restore();$('penBtn').setAttribute('aria-expanded',String(document.body.classList.contains('tools-open')));}).observe(document.body,{attributes:true,attributeFilter:['class']});
+ window.addEventListener('resize',restore);document.addEventListener('keydown',e=>{if(e.key==='Escape'&&toolsOpen)setToolsOpen(false);});restore();
+})();
+
+
+(function refineChartUI(){
+ const icons={penBtn:'<path d="m4 16-1 5 5-1L21 7l-4-4Z M14 6l4 4"/>',refreshBtn:'<path d="M20 5v6h-6M4 19v-6h6M5 8a7 7 0 0 1 12-4l3 4M4 16l3 4a7 7 0 0 0 12-4"/>',maxBtn:'<path d="M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5"/>',gear:'<path d="M3 6h18M3 12h18M3 18h18M8 3v6m8 0v6m-8 0v6"/>'};
+ Object.entries(icons).forEach(([id,path])=>{const b=$(id);b.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true">'+path+'</svg>';b.setAttribute('aria-label',b.title||id);});
+ const layout=$('layoutBtn');const layoutIcon=()=>{layout.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/>'+(layoutMode==='v'?'<path d="M3 12h18"/>':layoutMode==='h'?'<path d="M12 3v18"/>':'')+'</svg>';layout.setAttribute('aria-label','分割：'+(layoutMode==='1'?'1画面':layoutMode==='v'?'上下':'左右'));};new MutationObserver(()=>{if(!layout.querySelector('svg'))layoutIcon();}).observe(layout,{childList:true});layoutIcon();
+ const actions=document.createElement('div');actions.id='selectionActions';actions.hidden=true;actions.setAttribute('aria-label','選択した描画の操作');
+ [['色・太さ',()=>openDrawingStyle()],['戻す',()=>doUndo()],['選択解除',()=>{selected=null;hideDelBtn();layoutOverlay();}],['削除',()=>$('delOneBtn').click()]].forEach(([name,fn])=>{const b=document.createElement('button');b.textContent=name;b.onclick=fn;actions.appendChild(b);});$('chartWrap').appendChild(actions);
+ const polyBar=document.createElement('div');polyBar.id='polyActions';polyBar.hidden=true;polyBar.setAttribute('aria-label','折線の作成');
+ const count=document.createElement('span');count.id='polyCount';count.setAttribute('aria-live','polite');polyBar.appendChild(count);
+ [['polyDone','完了',()=>{if(pendingPoly&&pendingPoly.length>=2){setTool(null);setFoot('折線を保存しました。タップして点を修正できます');}}],['polyBack','1点戻す',backPoly],['polyCancel','取消',cancelPoly]].forEach(([id,label,fn])=>{const b=document.createElement('button');b.id=id;b.textContent=label;b.onclick=fn;polyBar.appendChild(b);});$('chartWrap').appendChild(polyBar);syncPolyActions();
+ $('chart').addEventListener('pointerdown',()=>{if(!tool&&!drag){selected=null;hideDelBtn();layoutOverlay();}});
+ const latest=document.createElement('button');latest.id='latestBtn';latest.textContent='最新へ ›';latest.onclick=()=>{const n=currentCandles.length,show=initialBars($('chart'));if(n)chart.timeScale().setVisibleLogicalRange({from:Math.max(0,n-show),to:n+3});};$('chartWrap').appendChild(latest);
+ const panel=$('barMorePanel');
+ [['出来高の高さ','volume',6,30],['サブインジの高さ','sub',6,18]].forEach(([name,key,min,max])=>{const row=document.createElement('label');row.textContent=name;const r=document.createElement('input');r.type='range';r.min=min;r.max=max;r.value=Math.round((panePrefs[key]||.12)*100);r.setAttribute('aria-label',name);const out=document.createElement('output');out.textContent=r.value+'%';r.oninput=()=>{panePrefs[key]=r.value/100;panePrefs.compact=false;out.textContent=r.value+'%';layoutPanes();layoutOverlay();};r.onchange=()=>store.set('mychart-pane-view',panePrefs);row.append(r,out);panel.appendChild(row);});
+ const compact=document.createElement('button');const label=()=>compact.textContent=panePrefs.compact?'ペインを通常表示':'価格チャートを広く';label();compact.onclick=()=>{panePrefs.compact=!panePrefs.compact;store.set('mychart-pane-view',panePrefs);label();layoutPanes();layoutOverlay();};panel.appendChild(compact);
+})();
 
 render();
 setLayout(layoutMode);   // 前回のレイアウト（1画面/上下/左右）を復元
