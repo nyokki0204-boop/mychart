@@ -253,6 +253,24 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 .tf button{min-height:36px;font-size:13px}.legend{font-size:12px;line-height:1.5}#indChips{top:52px;max-width:66%}#indTable{top:52px;max-width:32%;font-size:11px}#indTable td{max-width:100px;overflow:hidden;text-overflow:ellipsis}
 #selectionActions{position:absolute;bottom:34px;left:8px;z-index:9;display:flex;gap:5px;padding:4px;background:#19212eed;border:1px solid #394356;border-radius:8px}#selectionActions[hidden]{display:none}#selectionActions button{min-height:36px;padding:6px 10px;color:#d1d4dc;background:transparent;border:0;font-size:12px}#selectionActions button:last-child{color:#ef5350}
 #latestBtn{position:absolute;right:70px;bottom:30px;z-index:8;border:1px solid #394356;border-radius:7px;background:#19212ee6;color:#d1d4dc;padding:7px 9px;font-size:12px;min-height:34px}
+/* Sector context floats over the chart; it never creates another layout row. */
+#sectorContext{position:absolute;top:6px;right:7px;z-index:8;max-width:calc(100% - 14px)}
+#sectorChip{display:block;margin-left:auto;max-width:min(190px,56vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  background:rgba(22,27,36,.94);border:1px solid #394356;border-radius:7px;color:var(--text);
+  padding:5px 8px;font-size:11px;line-height:1.35;font-weight:600;min-height:30px;cursor:pointer}
+#sectorChip.improving{color:var(--up)}#sectorChip.weakening{color:var(--down)}
+#sectorPanel{position:absolute;top:35px;right:0;width:min(300px,calc(100vw - 16px));max-height:min(70dvh,470px);overflow-y:auto;
+  background:#19212e;border:1px solid #394356;border-radius:9px;box-shadow:0 12px 30px #000a;padding:12px;
+  font-size:12px;line-height:1.5;touch-action:pan-y}
+#sectorPanel[hidden]{display:none}#sectorPanel h3{font-size:14px;margin:0 0 8px}
+#sectorPanel .sector-muted{color:#a8b3c5}#sectorPanel .sector-status{margin:6px 0;color:var(--text)}
+#sectorPanel .sector-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin:10px 0}
+#sectorPanel .sector-metrics span{font-size:11px;color:#a8b3c5}#sectorPanel .sector-metrics b{display:block;color:var(--text);font-size:12px}
+#sectorPanel select{width:100%;min-height:40px;margin-top:6px;background:#0e1117;color:var(--text);border:1px solid #394356;border-radius:6px;padding:6px;font-size:14px}
+#sectorPanel .sector-actions{display:flex;gap:6px;margin-top:7px}#sectorPanel .sector-actions button{flex:1;min-height:40px;
+  background:#233044;color:var(--text);border:1px solid #394356;border-radius:6px;font-size:12px}
+#sectorPanel .sector-actions button:first-child{background:var(--accent);border-color:var(--accent);color:#fff}
+@media(max-width:380px){#sectorChip{max-width:155px}}
 @media(hover:hover){button:hover{filter:brightness(1.25);background-color:#263247}button:focus-visible{outline:2px solid #81afff}}
 
 </style>
@@ -321,6 +339,20 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
         <span class="item">C<b id="lg-c">-</b></span>
         <span class="item"><span id="changeLabel">前の足比</span><b id="lg-chg">-</b></span>
         <span class="item">出来高<b id="lg-vol">-</b></span>
+      </div>
+      <div id="sectorContext">
+        <button id="sectorChip" type="button" aria-expanded="false" aria-controls="sectorPanel">セクター確認中…</button>
+        <section id="sectorPanel" hidden aria-label="セクターの強さ">
+          <h3 id="sectorTitle">セクターの強さ</h3>
+          <div id="sectorStatus" class="sector-status"></div>
+          <div id="sectorSource" class="sector-muted"></div>
+          <div id="sectorMetrics" class="sector-metrics"></div>
+          <div id="sectorDate" class="sector-muted"></div>
+          <div id="sectorExplain" class="sector-muted"></div>
+          <label for="sectorManual">判定が違う場合は手動で指定</label>
+          <select id="sectorManual" aria-label="手動でセクターを指定"></select>
+          <div class="sector-actions"><button id="sectorSave" type="button">指定を保存</button><button id="sectorReset" type="button">自動判定に戻す</button></div>
+        </section>
       </div>
     <table id="indTable"></table>
     </div>
@@ -465,7 +497,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v54 (ラッセル候補の自動同期)';
+const APP_VERSION='v55 (セクター強度の連携)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -663,6 +695,10 @@ const RUSSELL_LISTS=[
 let russellBusy=false;
 let russellReviewed=store.get('mychart-russell-reviewed',{});
 let refreshRussellView=()=>{}; // main() の画面部品が起動後に接続する
+let refreshRussellSectorView=()=>{};
+let russellSectorMap=store.get('mychart-russell-sectors',{});
+let russellSectorDate=store.get('mychart-russell-sector-date','');
+if(!russellSectorMap || typeof russellSectorMap!=='object' || Array.isArray(russellSectorMap)) russellSectorMap={};
 if(!russellReviewed || typeof russellReviewed!=='object' || Array.isArray(russellReviewed)) russellReviewed={};
 function isRussellList(L){ return !!(L && RUSSELL_LISTS.some(x=>x.source===L.source)); }
 function syncMessage(message,warn=false){
@@ -718,7 +754,7 @@ async function syncRussell(){
     ]);
     const results=csvRows(resultsText), history=csvRows(historyText), passes=csvRows(passesText);
     const rHead=results.shift()||[], hHead=history.shift()||[], pHead=passes.shift()||[];
-    const rTicker=rHead.indexOf('ticker'), rPass=rHead.indexOf('all_pass');
+    const rTicker=rHead.indexOf('ticker'), rPass=rHead.indexOf('all_pass'), rSector=rHead.indexOf('sector');
     const hDate=hHead.indexOf('date'), hTotal=hHead.indexOf('total'), hPass=hHead.indexOf('all_pass');
     const pDate=pHead.indexOf('date'), pTicker=pHead.indexOf('ticker');
     if([rTicker,rPass,hDate,hTotal,hPass,pDate,pTicker].some(i=>i<0)) throw new Error('CSVの列が不足しています');
@@ -753,6 +789,19 @@ async function syncRussell(){
     });
     if(!store.set('mychart-lists',nextLists)) throw new Error('端末への保存に失敗');
     lists=nextLists;
+    // 「通過した銘柄」だけでなくスキャン対象全体の業種を活用する。
+    // 信頼できない業種名は推定すらせず、表示側で不明とする。
+    if(rSector>=0){
+      const sectorMap={};
+      results.forEach(row=>{
+        const ticker=row[rTicker], sector=row[rSector];
+        if(/^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker) && sector) sectorMap[ticker]=sector;
+      });
+      russellSectorMap=sectorMap; russellSectorDate=scanDate;
+      store.set('mychart-russell-sectors',sectorMap);
+      store.set('mychart-russell-sector-date',scanDate);
+      refreshRussellSectorView();
+    }
     // 再登場のみ以前の確認を外す。継続候補は確認状況を引き継ぐ。
     if(previous!==scanDate) reentry.forEach(t=>delete russellReviewed[t]);
     store.set('mychart-russell-scan-date',scanDate);
@@ -766,6 +815,46 @@ async function syncRussell(){
     syncMessage('同期できません（'+(e&&e.message||'通信エラー')+'）。'+
       (last?'前回 '+last+' の候補を保持':'既存リストはそのまま'),true);
   }finally{ russellBusy=false; }
+}
+/* =========================================================
+   セクターの判定: ETF保有銘柄 > ラッセルの業種列 > 不明。
+   ラッセルの分類はETFのGICSと同一とは限らず、必ず推定と表示する。
+   ========================================================= */
+const SECTOR_NAMES={XLK:'テクノロジー',XLV:'ヘルスケア',XLF:'金融',XLY:'一般消費財',
+  XLC:'コミュニケーション',XLI:'資本財',XLP:'生活必需品',XLE:'エネルギー',
+  XLU:'公益事業',XLRE:'不動産',XLB:'素材'};
+const RUSSELL_SECTOR_ETF={Technology:'XLK',Healthcare:'XLV','Financial Services':'XLF',
+  'Consumer Cyclical':'XLY','Communication Services':'XLC',Industrials:'XLI',
+  'Consumer Defensive':'XLP',Energy:'XLE',Utilities:'XLU','Real Estate':'XLRE',
+  'Basic Materials':'XLB'};
+const SECTOR_FEED_URL='https://raw.githubusercontent.com/nyokki0204-boop/rs-screener/main/data/sector_feed.json';
+const SECTOR_HOLDINGS_URL='https://raw.githubusercontent.com/nyokki0204-boop/rs-screener/main/data/sector_holdings.json';
+function sectorDecision(ticker, feed, russell, overrides){
+  ticker=String(ticker||'').toUpperCase();
+  if(!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker)) return {ticker,sector:null,source:'式・対象外'};
+  const lookup=ticker.replace(/\./g,'-');
+  const manual=overrides && overrides[ticker];
+  if(manual && SECTOR_NAMES[manual]) return {ticker,sector:manual,source:'手動指定'};
+  if(SECTOR_NAMES[ticker]) return {ticker,sector:ticker,source:'セクターETF'};
+  if(feed && feed.holdings && SECTOR_NAMES[feed.holdings[lookup]])
+    return {ticker,sector:feed.holdings[lookup],source:'確認済み'};
+  const match=russell && RUSSELL_SECTOR_ETF[russell[lookup]||russell[ticker]];
+  if(match) return {ticker,sector:match,source:'推定'};
+  return {ticker,sector:null,source:'不明'};
+}
+function validateSectorFeed(feed){
+  return feed && feed.version===1 && feed.benchmark==='QQQ' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(feed.price_date||'') &&
+    /^\d{4}-\d{2}-\d{2}$/.test(feed.holdings_date||'') &&
+    feed.sectors && Object.keys(SECTOR_NAMES).every(t=>feed.sectors[t] &&
+      Number.isFinite(feed.sectors[t].score) && Number.isFinite(feed.sectors[t].change_pt) &&
+      Number.isInteger(feed.sectors[t].rank) && feed.sectors[t].rank>=1 && feed.sectors[t].rank<=11) &&
+    feed.holdings && Object.keys(feed.holdings).length>=450;
+}
+function validateSectorHoldings(record){
+  return record && record.version===1 && /^\d{4}-\d{2}-\d{2}$/.test(record.holdings_date||'') &&
+    record.holdings && Object.keys(record.holdings).length>=450 &&
+    Object.values(record.holdings).every(t=>!!SECTOR_NAMES[t]);
 }
 /* =========================================================
    ② 実データ取得（Twelve Data）
@@ -1626,6 +1715,108 @@ let drawingsMap=store.get('mychart-drawings', {});
 })();
 const $=id=>document.getElementById(id);
 const isFav=t=>favs.includes(t);
+let sectorFeed=store.get('mychart-sector-feed',null);
+if(!validateSectorFeed(sectorFeed)) sectorFeed=null;
+let sectorHoldings=store.get('mychart-sector-holdings',null);
+if(!validateSectorHoldings(sectorHoldings)) sectorHoldings=null;
+let sectorFetchError='';
+let sectorOverrides=store.get('mychart-sector-overrides',{});
+if(!sectorOverrides || typeof sectorOverrides!=='object' || Array.isArray(sectorOverrides)) sectorOverrides={};
+const sectorSelect=$('sectorManual');
+sectorSelect.appendChild(new Option('自動判定のまま',''));
+Object.entries(SECTOR_NAMES).forEach(([ticker,name])=>sectorSelect.appendChild(new Option(name+'（'+ticker+'）',ticker)));
+function sectorAge(date){
+  const age=(Date.now()-Date.parse(date+'T00:00:00Z'))/86400000;
+  return Number.isFinite(age) && age>14 ? '（更新遅延）' : '';
+}
+function closeSectorPanel(){ $('sectorPanel').hidden=true; $('sectorChip').setAttribute('aria-expanded','false'); }
+function updateSectorContext(){
+  const ticker=current.ticker;
+  const chosen=sectorDecision(ticker,sectorHoldings||sectorFeed,russellSectorMap,sectorOverrides);
+  const info=chosen.sector && sectorFeed && sectorFeed.sectors[chosen.sector];
+  const scoreDelayed=sectorFeed && !!sectorAge(sectorFeed.price_date);
+  const chip=$('sectorChip');
+  chip.classList.remove('improving','weakening');
+  let arrow='';
+  if(info && !scoreDelayed){
+    const threshold=Number.isFinite(sectorFeed.neutral_change_pt)?sectorFeed.neutral_change_pt:0.2;
+    arrow=info.change_pt>threshold?' ↗':info.change_pt < -threshold?' ↘':' →';
+    if(arrow===' ↗') chip.classList.add('improving');
+    if(arrow===' ↘') chip.classList.add('weakening');
+  }
+  chip.textContent=chosen.sector ? SECTOR_NAMES[chosen.sector]+'（'+chosen.sector+'）'+arrow
+    : chosen.source==='式・対象外' ? 'セクター対象外' : 'セクター不明';
+  $('sectorTitle').textContent=chosen.sector ? SECTOR_NAMES[chosen.sector]+'（'+chosen.sector+'）' : 'セクター不明';
+  $('sectorStatus').textContent=info
+    ? (scoreDelayed?'更新遅延・参考値 ｜ ':'')+info.state+' ｜ '+info.rank+' / 11位 ｜ 前週差 '+(info.change_pt>=0?'+':'')+info.change_pt.toFixed(2)+' pt'
+    : chosen.sector ? 'RSの結果を取得できていません' : '誤判定を避けるため強度は表示しません';
+  const source=chosen.source==='確認済み'?'セクターETFの保有銘柄で照合'
+    : chosen.source==='推定'?'ラッセル結果の業種列から推定（公式GICSではありません）'
+    : chosen.source==='手動指定'?'この端末で手動指定':'分類：'+chosen.source;
+  $('sectorSource').textContent=source;
+  const metrics=$('sectorMetrics'); metrics.replaceChildren();
+  if(info){
+    for(const p of [4,13,26,52]){
+      const cell=document.createElement('span'), value=document.createElement('b');
+      value.textContent=Number.isFinite(info.periods && info.periods[String(p)])
+        ? info.periods[String(p)].toFixed(3) : '—';
+      cell.textContent=p+'週RS'; cell.appendChild(value); metrics.appendChild(cell);
+    }
+  }
+  const holdingsDate=(sectorHoldings&&sectorHoldings.holdings_date)||(sectorFeed&&sectorFeed.holdings_date);
+  $('sectorDate').textContent=(sectorFeed?'価格基準日 '+sectorFeed.price_date+sectorAge(sectorFeed.price_date)
+    : 'RSデータ未取得')+(holdingsDate?' ｜ 保有銘柄 '+holdingsDate+sectorAge(holdingsDate):'')+
+    (sectorFetchError?' ｜ RS更新失敗':'')+
+    (chosen.source==='推定'&&russellSectorDate?' ｜ ラッセル '+russellSectorDate+sectorAge(russellSectorDate):'');
+  $('sectorExplain').textContent=chosen.source==='推定'
+    ? 'この強度はS&P 500の大型株セクターETFの参考値で、この小型株自身の強さではありません。'
+    : 'RSは対QQQの相対成績。ETF自体が上昇したことや資金流入を意味しません。';
+  sectorSelect.value=sectorOverrides[ticker]||'';
+  $('sectorSave').disabled=chosen.source==='式・対象外';
+  $('sectorReset').disabled=!sectorOverrides[ticker];
+}
+refreshRussellSectorView=updateSectorContext;
+$('sectorChip').addEventListener('click',()=>{
+  const panel=$('sectorPanel'); panel.hidden=!panel.hidden;
+  $('sectorChip').setAttribute('aria-expanded',String(!panel.hidden));
+});
+document.addEventListener('pointerdown',e=>{
+  if(!$('sectorContext').contains(e.target)) closeSectorPanel();
+});
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSectorPanel(); });
+$('sectorSave').addEventListener('click',()=>{
+  const ticker=current.ticker, selected=sectorSelect.value;
+  if(!SECTOR_NAMES[selected] || !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker)) return;
+  const next={...sectorOverrides,[ticker]:selected};
+  if(store.set('mychart-sector-overrides',next)){
+    sectorOverrides=next; updateSectorContext(); closeSectorPanel();
+  }
+});
+$('sectorReset').addEventListener('click',()=>{
+  const next={...sectorOverrides}; delete next[current.ticker];
+  if(store.set('mychart-sector-overrides',next)){
+    sectorOverrides=next; updateSectorContext(); closeSectorPanel();
+  }
+});
+async function loadSectorFeed(){
+  try{
+    const response=await fetch(SECTOR_FEED_URL,{cache:'no-store'});
+    if(!response.ok) throw new Error('HTTP '+response.status);
+    const feed=await response.json();
+    if(!validateSectorFeed(feed)) throw new Error('データの形式が不正');
+    sectorFeed=feed; sectorFetchError='';
+    store.set('mychart-sector-feed',feed); updateSectorContext();
+  }catch(e){ sectorFetchError=String(e&&e.message||e); updateSectorContext(); }
+}
+async function loadSectorHoldings(){
+  try{
+    const response=await fetch(SECTOR_HOLDINGS_URL,{cache:'no-store'});
+    if(!response.ok) throw new Error('HTTP '+response.status);
+    const record=await response.json();
+    if(!validateSectorHoldings(record)) throw new Error('保有銘柄データが不正');
+    sectorHoldings=record; store.set('mychart-sector-holdings',record); updateSectorContext();
+  }catch(e){ updateSectorContext(); }
+}
 
 /* 描画の置き直しが必要かを判断するための目印。
    draw() から参照するので、draw() より前で宣言しておく
@@ -1728,6 +1919,7 @@ async function render(){
   $('hdrTicker').textContent=ticker;
   $('hdrFav').style.display=isFav(ticker)?'inline':'none';
   store.set('mychart-last', ticker);
+  closeSectorPanel(); updateSectorContext();
 
   if(realCache[cacheKey]){
     setLoading(false);
@@ -4106,6 +4298,7 @@ const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-las
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
   'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
   'mychart-russell-reviewed','mychart-russell-scan-date',
+  'mychart-sector-overrides',
   'mychart-logscale','mychart-tools-open','mychart-api-count','mychart-magnet','mychart-api-times','mychart-bar-position','mychart-vp-view','mychart-bar-tools','mychart-pane-view'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
@@ -4303,14 +4496,9 @@ function syncAxisLabels(){
  const compact=document.createElement('button');const label=()=>compact.textContent=panePrefs.compact?'ペインを通常表示':'価格チャートを広く';label();compact.onclick=()=>{panePrefs.compact=!panePrefs.compact;store.set('mychart-pane-view',panePrefs);label();layoutPanes();layoutOverlay();};panel.appendChild(compact);
 })();
 
-// 外部スクリーナーから ?ticker=NVDA で指定された銘柄を開く。
-// ウォッチリストへの追加や保存中の銘柄設定は変更しない。
-const linkedTicker=new URLSearchParams(location.search).get('ticker');
-if(linkedTicker){
-  const ticker=linkedTicker.trim().toUpperCase();
-  if(/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker)) current.ticker=ticker;
-}
 render();
+loadSectorFeed(); // 価格APIの無料枠を消費せず、独立に週次の公開結果を取得
+loadSectorHoldings();
 setLayout(layoutMode);   // 前回のレイアウト（1画面/上下/左右）を復元
 applyScaleMode();        // 前回選んだ目盛り（対数/普通）を復元
 setTimeout(()=>{ const f=$('foot'); if(f) f.textContent='起動しました  '+APP_VERSION; }, 300);
