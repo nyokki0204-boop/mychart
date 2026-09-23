@@ -4496,6 +4496,13 @@ function syncAxisLabels(){
  const compact=document.createElement('button');const label=()=>compact.textContent=panePrefs.compact?'ペインを通常表示':'価格チャートを広く';label();compact.onclick=()=>{panePrefs.compact=!panePrefs.compact;store.set('mychart-pane-view',panePrefs);label();layoutPanes();layoutOverlay();};panel.appendChild(compact);
 })();
 
+// 外部スクリーナーから ?ticker=NVDA で指定された銘柄を開く。
+// ウォッチリストへの追加や保存中の銘柄設定は変更しない。
+const linkedTicker=new URLSearchParams(location.search).get('ticker');
+if(linkedTicker){
+  const ticker=linkedTicker.trim().toUpperCase();
+  if(/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker)) current.ticker=ticker;
+}
 render();
 loadSectorFeed(); // 価格APIの無料枠を消費せず、独立に週次の公開結果を取得
 loadSectorHoldings();
