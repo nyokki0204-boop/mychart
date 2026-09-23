@@ -140,6 +140,16 @@
   .row .del { color:#5b6472; font-size:17px; padding:0 2px 0 6px; }
   /* 複数ウォッチリストの切り替えタブ（チップ） */
   .listTabs { display:flex; gap:6px; padding:8px 14px 0; flex-wrap:wrap; align-items:center; }
+  .sync-status { display:flex; align-items:center; gap:8px; padding:8px 14px; color:var(--muted); font-size:12px; line-height:1.5; border-bottom:1px solid var(--line); }
+  .sync-status span { flex:1; min-width:0; }
+  .sync-status.warn { color:#f5a623; }
+  .sync-status button { flex:none; background:transparent; color:var(--accent); border:0; font-size:12px; padding:6px 4px; cursor:pointer; }
+  .row.auto { display:grid; grid-template-columns:22px minmax(0,1fr) auto; gap:6px 10px; }
+  .row.auto .rt { grid-column:3; grid-row:1; }
+  .row.auto .auto-actions { grid-column:2/4; grid-row:2; }
+  .auto-actions { display:flex; gap:4px; flex-wrap:wrap; }
+  .auto-actions button { background:#233044; border:1px solid #394356; color:var(--text); border-radius:5px; font-size:11px; padding:5px 9px; min-height:40px; }
+  .auto-actions button.reviewed { color:#00c888; }
   .chip { background:#1c2431; color:var(--muted); border:1px solid var(--line); border-radius:14px;
     padding:5px 12px; font-size:12px; font-weight:600; cursor:pointer; }
   .chip.active { background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -333,6 +343,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
       <button id="showBtn">表示</button>
       <button id="addBtn">＋追加</button>
     </div>
+    <div id="russellSync" class="sync-status" aria-live="polite"><span id="russellSyncText">ラッセル候補を確認中…</span> <button id="russellRefresh" type="button">再取得</button></div>
     <div class="listTabs" id="listTabs"></div>
     <div class="list" id="list"></div>
     <div class="backup">
@@ -454,7 +465,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v53 (折線・描画編集の改善)';
+const APP_VERSION='v54 (ラッセル候補の自動同期)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -637,10 +648,125 @@ let activeListId = store.get('mychart-active-list', lists[0].id);
 if(!lists.some(L=>L.id===activeListId)) activeListId = lists[0].id;
 
 function activeList(){ return lists.find(L=>L.id===activeListId) || lists[0]; }
-function saveLists(){ store.set('mychart-lists', lists); }
+function saveLists(){ return store.set('mychart-lists', lists); }
 // ティッカーから表示用の情報（名前など）を返す
 function symInfo(t){ return SYMBOLS.find(s=>s.ticker===t) || { ticker:t, name:'追加した銘柄' }; }
 
+/* ラッセル・スクリーナーの公開結果を専用リストにだけ同期する。
+   不完全な更新・通信失敗では前回の候補と手動リストを残す。 */
+const RUSSELL_BASE='https://raw.githubusercontent.com/nyokki0204-boop/russell-screener/main/data/';
+const RUSSELL_LISTS=[
+  {source:'russell:all',name:'ラッセル候補'},
+  {source:'russell:new',name:'今週の新規'},
+  {source:'russell:reentry',name:'再登場'}
+];
+let russellBusy=false;
+let russellReviewed=store.get('mychart-russell-reviewed',{});
+let refreshRussellView=()=>{}; // main() の画面部品が起動後に接続する
+if(!russellReviewed || typeof russellReviewed!=='object' || Array.isArray(russellReviewed)) russellReviewed={};
+function isRussellList(L){ return !!(L && RUSSELL_LISTS.some(x=>x.source===L.source)); }
+function syncMessage(message,warn=false){
+  document.getElementById('russellSyncText').textContent=message;
+  document.getElementById('russellSync').classList.toggle('warn',warn);
+}
+async function fetchRussell(name){
+  const response=await fetch(RUSSELL_BASE+name,{cache:'no-store'});
+  if(!response.ok) throw new Error(name+' HTTP '+response.status);
+  return response.text();
+}
+function csvRows(text){
+  const rows=[], row=[]; let field='', quoted=false;
+  text=String(text).replace(/^\uFEFF/,'');
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+    if(quoted){
+      if(ch==='"' && text[i+1]==='"'){ field+='"'; i++; }
+      else if(ch==='"') quoted=false;
+      else field+=ch;
+    }else if(ch==='"') quoted=true;
+    else if(ch===','){ row.push(field); field=''; }
+    else if(ch==='\n'){
+      row.push(field.replace(/\r$/,'')); field='';
+      if(row.some(x=>x!=='')) rows.push(row.splice(0));
+      else row.length=0;
+    }else field+=ch;
+  }
+  if(quoted) throw new Error('CSVの引用符が閉じられていません');
+  if(field!=='' || row.length){ row.push(field.replace(/\r$/,'')); rows.push(row); }
+  return rows;
+}
+function watchRussellTicker(t){
+  const updated=lists.map(L=>({...L,tickers:[...L.tickers]}));
+  let target=updated.find(L=>!isRussellList(L) && L.name==='監視');
+  if(!target){ target={id:Date.now(),name:'監視',tickers:[]}; updated.push(target); }
+  if(!target.tickers.includes(t)) target.tickers.push(t);
+  if(store.set('mychart-lists',updated)){
+    lists=updated;
+    russellReviewed[t]=true;
+    store.set('mychart-russell-reviewed',russellReviewed);
+    refreshRussellView(); setFoot(t+' を手動の「監視」に保存しました');
+  }
+}
+async function syncRussell(){
+  if(russellBusy) return;
+  russellBusy=true;
+  syncMessage('ラッセル候補を更新中…');
+  try{
+    const [resultsText,historyText,passesText,updatedText]=await Promise.all([
+      fetchRussell('results.csv'),fetchRussell('history.csv'),
+      fetchRussell('pass_history.csv'),fetchRussell('last_updated.txt')
+    ]);
+    const results=csvRows(resultsText), history=csvRows(historyText), passes=csvRows(passesText);
+    const rHead=results.shift()||[], hHead=history.shift()||[], pHead=passes.shift()||[];
+    const rTicker=rHead.indexOf('ticker'), rPass=rHead.indexOf('all_pass');
+    const hDate=hHead.indexOf('date'), hTotal=hHead.indexOf('total'), hPass=hHead.indexOf('all_pass');
+    const pDate=pHead.indexOf('date'), pTicker=pHead.indexOf('ticker');
+    if([rTicker,rPass,hDate,hTotal,hPass,pDate,pTicker].some(i=>i<0)) throw new Error('CSVの列が不足しています');
+    const scanDate=updatedText.trim();
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(scanDate) || history.length===0 ||
+       history[history.length-1][hDate]!==scanDate) throw new Error('更新日の整合性がありません');
+    const total=Number(history[history.length-1][hTotal]);
+    if(total<1000 || results.length!==total) throw new Error('スキャン件数が一致しません');
+    const all=results.filter(r=>r[rPass]==='True').map(r=>r[rTicker]);
+    if(all.length!==Number(history[history.length-1][hPass]) ||
+       all.some(t=>!/^[A-Z]{1,5}$/.test(t)) || new Set(all).size!==all.length)
+      throw new Error('候補銘柄に不整合があります');
+    const priorDate=history.length>=2 ? history[history.length-2][hDate] : null;
+    const prior=new Set(), older=new Set(), latest=new Set();
+    for(const row of passes){
+      const date=row[pDate], ticker=row[pTicker];
+      if(!/^[A-Z]{1,5}$/.test(ticker)) continue;
+      if(date===scanDate) latest.add(ticker);
+      else if(date===priorDate) prior.add(ticker);
+      else if(date<scanDate) older.add(ticker);
+    }
+    if(latest.size!==all.length || all.some(t=>!latest.has(t)))
+      throw new Error('履歴と候補が一致しません');
+    const fresh=priorDate ? all.filter(t=>!prior.has(t) && !older.has(t)) : [];
+    const reentry=priorDate ? all.filter(t=>!prior.has(t) && older.has(t)) : [];
+    const previous=store.get('mychart-russell-scan-date',null);
+    const nextLists=lists.slice();
+    [all,fresh,reentry].forEach((tickers,i)=>{
+      const spec=RUSSELL_LISTS[i], index=nextLists.findIndex(L=>L.source===spec.source);
+      if(index>=0) nextLists[index]={...nextLists[index],tickers};
+      else nextLists.push({id:spec.source,name:spec.name,source:spec.source,tickers});
+    });
+    if(!store.set('mychart-lists',nextLists)) throw new Error('端末への保存に失敗');
+    lists=nextLists;
+    // 再登場のみ以前の確認を外す。継続候補は確認状況を引き継ぐ。
+    if(previous!==scanDate) reentry.forEach(t=>delete russellReviewed[t]);
+    store.set('mychart-russell-scan-date',scanDate);
+    store.set('mychart-russell-reviewed',russellReviewed);
+    refreshRussellView();
+    const stale=Date.now()-Date.parse(scanDate+'T00:00:00Z')>10*86400000;
+    syncMessage('ラッセル '+scanDate+'：候補'+all.length+'・新規'+fresh.length+'・再登場'+reentry.length+
+      (stale?'（10日以上前の結果）':''),stale);
+  }catch(e){
+    const last=store.get('mychart-russell-scan-date',null);
+    syncMessage('同期できません（'+(e&&e.message||'通信エラー')+'）。'+
+      (last?'前回 '+last+' の候補を保持':'既存リストはそのまま'),true);
+  }finally{ russellBusy=false; }
+}
 /* =========================================================
    ② 実データ取得（Twelve Data）
    キーが無い/失敗した時は例外を投げ、呼び出し側でサンプルに切替
@@ -3517,6 +3643,8 @@ function renderTabs(){
     });
   });
   tabs.appendChild(add);
+  // 同期で管理するリストは内容と名前を直接変更できない。
+  if(isRussellList(activeList())) return;
   // ✎ いま開いているリストの名前を変える
   const ren=document.createElement('button'); ren.className='chip mini'; ren.textContent='✎';
   ren.addEventListener('click',()=>{
@@ -3528,7 +3656,7 @@ function renderTabs(){
   });
   tabs.appendChild(ren);
   // 🗑 いま開いているリストを削除（1回目のタップで確認、もう一度タップで実行）
-  if(lists.length>1){
+  if(lists.filter(L=>!isRussellList(L)).length>1){
     const del=document.createElement('button'); del.className='chip mini'; del.textContent='🗑';
     let armed=false;
     del.addEventListener('click',()=>{
@@ -3559,7 +3687,7 @@ function renderList(){
   const list=$('list'); list.innerHTML='';
   const my=++listRenderToken;
   const tickers=activeList().tickers;
-  if(!tickers.length){ list.appendChild(label('「＋追加」で銘柄を入れてください')); return; }
+  if(!tickers.length){ list.appendChild(label(isRussellList(activeList()) ? '該当銘柄なし' : '「＋追加」で銘柄を入れてください')); return; }
   const fav=tickers.filter(t=>isFav(t)), oth=tickers.filter(t=>!isFav(t));
   const items=[];
   if(fav.length){ items.push({label:'★ お気に入り'}); fav.forEach(t=>items.push({t})); items.push({label:'リストの銘柄'}); }
@@ -3583,7 +3711,7 @@ function renderList(){
 function label(t){ const d=document.createElement('div'); d.className='sec-label'; d.textContent=t; return d; }
 function rowEl(s){
   const pr=priceOf(s.ticker);
-  const row=document.createElement('div'); row.className='row'+(s.ticker===current.ticker?' active':'');
+  const row=document.createElement('div'); row.className='row'+(isRussellList(activeList())?' auto':'')+(s.ticker===current.ticker?' active':'');
   row.innerHTML=`
     <div class="star ${isFav(s.ticker)?'on':''}" data-star="${s.ticker}">${isFav(s.ticker)?'★':'☆'}</div>
     <div><div class="tk">${s.ticker}</div><div class="nm">${s.name}</div></div>
@@ -3591,14 +3719,21 @@ function rowEl(s){
       ? `<div class="price">${fmtPrice(pr.price)}</div>
          <div class="chg ${pr.chg>=0?'up':'down'}">${pr.chg>=0?'+':''}${pr.chg.toFixed(2)}%</div>`
       : `<div class="price" style="opacity:.35" title="チャートを開くと価格を取得します">—</div>` }</div>
-    <div class="del" data-move="${s.ticker}" title="別のリストへ移動">⇄</div>
-    <div class="del" data-del="${s.ticker}">×</div>`;
+    ${isRussellList(activeList())
+      ? `<div class="auto-actions"><button data-watch="${s.ticker}" type="button">監視へ</button><button data-review="${s.ticker}" type="button" class="${russellReviewed[s.ticker]?'reviewed':''}">${russellReviewed[s.ticker]?'✓確認済':'未確認'}</button></div>`
+      : `<div class="del" data-move="${s.ticker}" title="別のリストへ移動">⇄</div><div class="del" data-del="${s.ticker}">×</div>`}`;
   row.addEventListener('click',e=>{
+    if(e.target.dataset.watch){ watchRussellTicker(s.ticker); return; }
+    if(e.target.dataset.review){ russellReviewed[s.ticker]=!russellReviewed[s.ticker]; store.set('mychart-russell-reviewed',russellReviewed); renderList(); return; }
     if(e.target.dataset.star){ toggleFav(s.ticker); return; }      // ☆をタップ→お気に入り
     if(e.target.dataset.move){ moveSymbol(s.ticker); return; }     // ⇄をタップ→別リストへ移動
     if(e.target.dataset.del){ removeSymbol(s.ticker); return; }    // ×をタップ→このリストから外す
     if(symbolTarget===2){ c2.ticker=s.ticker; render2(); closeDrawer(); return; }
-    current.ticker=s.ticker; render(); renderList(); closeDrawer();
+    if(isRussellList(activeList())){
+      current.step='1w'; // 週足で抽出した候補は週足から確認する
+      document.querySelectorAll('.tf button[data-step]').forEach(b=>b.classList.toggle('active',b.dataset.step==='1w'));
+    }
+    current.ticker=s.ticker; render(); render2(); renderList(); closeDrawer();
   });
   return row;
 }
@@ -3638,7 +3773,13 @@ function showTicker(v){
 // カンマ区切りならまとめて追加できる（TradingView風）
 function addSymbol(v){
   const ts=parseTickers(v); if(!ts.length) return;
-  const L=activeList();
+  let L=activeList();
+  if(isRussellList(L)){
+    L=lists.find(x=>!isRussellList(x));
+    if(!L){ L={id:Date.now(),name:'メイン',tickers:[]}; lists.push(L); saveLists(); }
+    activeListId=L.id; store.set('mychart-active-list',activeListId);
+    renderTabs();
+  }
   const added=[];
   ts.forEach(t=>{ if(!L.tickers.includes(t)){ L.tickers.push(t); added.push(t); } });
   if(added.length) saveLists();
@@ -3964,6 +4105,7 @@ if(navigator.storage && navigator.storage.persist){
 const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-last',
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
   'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
+  'mychart-russell-reviewed','mychart-russell-scan-date',
   'mychart-logscale','mychart-tools-open','mychart-api-count','mychart-magnet','mychart-api-times','mychart-bar-position','mychart-vp-view','mychart-bar-tools','mychart-pane-view'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
@@ -4165,6 +4307,9 @@ render();
 setLayout(layoutMode);   // 前回のレイアウト（1画面/上下/左右）を復元
 applyScaleMode();        // 前回選んだ目盛り（対数/普通）を復元
 setTimeout(()=>{ const f=$('foot'); if(f) f.textContent='起動しました  '+APP_VERSION; }, 300);
+refreshRussellView=()=>{ renderTabs(); renderList(); };
+$('russellRefresh').addEventListener('click',syncRussell);
+syncRussell(); // チャート起動を待たせず候補だけ更新
 if(store.get('mychart-max', false)) setMax(true);   // 前回「最大化」なら復元
 } // main() ここまで
 
