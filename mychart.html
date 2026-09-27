@@ -140,10 +140,16 @@
   .row .del { color:#5b6472; font-size:17px; padding:0 2px 0 6px; }
   /* 複数ウォッチリストの切り替えタブ（チップ） */
   .listTabs { display:flex; gap:6px; padding:8px 14px 0; flex-wrap:wrap; align-items:center; }
+  .listGroups { display:flex; gap:6px; padding:8px 14px 0; }
+  .listGroups .chip { flex:1; padding:8px 3px; }
+  .listTabs { flex-wrap:nowrap; overflow-x:auto; flex:none; padding-bottom:8px; scrollbar-width:thin; }
+  .listTabs .chip { flex:none; white-space:nowrap; }
   .sync-status { display:flex; align-items:center; gap:8px; padding:8px 14px; color:var(--muted); font-size:12px; line-height:1.5; border-bottom:1px solid var(--line); }
+  .sync-status[hidden] { display:none; }
   .sync-status span { flex:1; min-width:0; }
   .sync-status.warn { color:#f5a623; }
   .sync-status button { flex:none; background:transparent; color:var(--accent); border:0; font-size:12px; padding:6px 4px; cursor:pointer; }
+  .sync-status a { flex:none; color:var(--accent); text-decoration:none; white-space:nowrap; }
   .row.auto { display:grid; grid-template-columns:22px minmax(0,1fr) auto; gap:6px 10px; }
   .row.auto .rt { grid-column:3; grid-row:1; }
   .row.auto .auto-actions { grid-column:2/4; grid-row:2; }
@@ -376,6 +382,8 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
       <button id="addBtn">＋追加</button>
     </div>
     <div id="russellSync" class="sync-status" aria-live="polite"><span id="russellSyncText">ラッセル候補を確認中…</span> <button id="russellRefresh" type="button">再取得</button></div>
+    <div id="ibdSync" class="sync-status" aria-live="polite"><span id="ibdSyncText">急伸候補を確認中…</span> <button id="ibdRefresh" type="button">再取得</button><a href="https://nyokki0204-boop.github.io/ibd-screener/" target="_blank" rel="noopener noreferrer">詳細 ↗</a></div>
+    <div class="listGroups" id="listGroups"></div>
     <div class="listTabs" id="listTabs"></div>
     <div class="list" id="list"></div>
     <div class="backup">
@@ -497,7 +505,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v55 (セクター強度の連携)';
+const APP_VERSION='v56 (急伸候補・セクター強度の連携)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -692,15 +700,28 @@ const RUSSELL_LISTS=[
   {source:'russell:new',name:'今週の新規'},
   {source:'russell:reentry',name:'再登場'}
 ];
+const IBD_BASE='https://raw.githubusercontent.com/nyokki0204-boop/ibd-screener/main/data/';
+const IBD_LISTS=[
+  {source:'ibd:all',name:'急伸候補'},
+  {source:'ibd:new',name:'急伸・初登場'},
+  {source:'ibd:reentry',name:'急伸・再登場'}
+];
 let russellBusy=false;
 let russellReviewed=store.get('mychart-russell-reviewed',{});
+let ibdBusy=false;
+let ibdReviewed=store.get('mychart-ibd-reviewed',{});
 let refreshRussellView=()=>{}; // main() の画面部品が起動後に接続する
 let refreshRussellSectorView=()=>{};
 let russellSectorMap=store.get('mychart-russell-sectors',{});
 let russellSectorDate=store.get('mychart-russell-sector-date','');
 if(!russellSectorMap || typeof russellSectorMap!=='object' || Array.isArray(russellSectorMap)) russellSectorMap={};
 if(!russellReviewed || typeof russellReviewed!=='object' || Array.isArray(russellReviewed)) russellReviewed={};
+if(!ibdReviewed || typeof ibdReviewed!=='object' || Array.isArray(ibdReviewed)) ibdReviewed={};
 function isRussellList(L){ return !!(L && RUSSELL_LISTS.some(x=>x.source===L.source)); }
+function isIbdList(L){ return !!(L && (IBD_LISTS.some(x=>x.source===L.source) || /^ibd:date:\d{4}-\d{2}-\d{2}$/.test(L.source||''))); }
+function isAutoList(L){ return isRussellList(L) || isIbdList(L); }
+function reviewedFor(L){ return isIbdList(L) ? ibdReviewed : russellReviewed; }
+function reviewKey(L){ return isIbdList(L) ? 'mychart-ibd-reviewed' : 'mychart-russell-reviewed'; }
 function syncMessage(message,warn=false){
   document.getElementById('russellSyncText').textContent=message;
   document.getElementById('russellSync').classList.toggle('warn',warn);
@@ -731,18 +752,20 @@ function csvRows(text){
   if(field!=='' || row.length){ row.push(field.replace(/\r$/,'')); rows.push(row); }
   return rows;
 }
-function watchRussellTicker(t){
+function watchAutoTicker(t,source){
   const updated=lists.map(L=>({...L,tickers:[...L.tickers]}));
-  let target=updated.find(L=>!isRussellList(L) && L.name==='監視');
+  let target=updated.find(L=>!isAutoList(L) && L.name==='監視');
   if(!target){ target={id:Date.now(),name:'監視',tickers:[]}; updated.push(target); }
   if(!target.tickers.includes(t)) target.tickers.push(t);
   if(store.set('mychart-lists',updated)){
     lists=updated;
-    russellReviewed[t]=true;
-    store.set('mychart-russell-reviewed',russellReviewed);
+    const L={source}, reviewed=reviewedFor(L);
+    reviewed[t]=true;
+    store.set(reviewKey(L),reviewed);
     refreshRussellView(); setFoot(t+' を手動の「監視」に保存しました');
   }
 }
+function watchRussellTicker(t){ watchAutoTicker(t,'russell:all'); }
 async function syncRussell(){
   if(russellBusy) return;
   russellBusy=true;
@@ -815,6 +838,90 @@ async function syncRussell(){
     syncMessage('同期できません（'+(e&&e.message||'通信エラー')+'）。'+
       (last?'前回 '+last+' の候補を保持':'既存リストはそのまま'),true);
   }finally{ russellBusy=false; }
+}
+function ibdMessage(message,warn=false){
+  document.getElementById('ibdSyncText').textContent=message;
+  document.getElementById('ibdSync').classList.toggle('warn',warn);
+}
+async function fetchIbd(name){
+  const response=await fetch(IBD_BASE+name,{cache:'no-store'});
+  if(!response.ok) throw new Error(name+' HTTP '+response.status);
+  return response.text();
+}
+async function syncIbd(){
+  if(ibdBusy) return;
+  ibdBusy=true;
+  ibdMessage('急伸候補を更新中…');
+  try{
+    const [resultsText,historyText,updatedText,statusText]=await Promise.all([
+      fetchIbd('results.csv'),fetchIbd('ticker_history.csv'),
+      fetchIbd('last_updated.txt'),fetchIbd('scan_status.json')
+    ]);
+    const status=JSON.parse(statusText), scanDate=updatedText.trim();
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(scanDate) || status.ok!==true ||
+       status.market_date!==scanDate ||
+       (status.expected_date && status.expected_date!==scanDate) ||
+       !(Number(status.coverage)>=0.8) || !(Number(status.universe)>0))
+      throw new Error('スキャン未完了または更新日の不整合');
+    const results=csvRows(resultsText), history=csvRows(historyText);
+    const rHead=results.shift()||[], hHead=history.shift()||[];
+    const rTicker=rHead.indexOf('ticker'), hDate=hHead.indexOf('date'), hTicker=hHead.indexOf('ticker');
+    if([rTicker,hDate,hTicker].some(i=>i<0)) throw new Error('CSVの列が不足しています');
+    const all=results.map(r=>r[rTicker]);
+    if(all.length!==Number(status.matched) ||
+       all.some(t=>!/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(t)) ||
+       new Set(all).size!==all.length)
+      throw new Error('候補件数または銘柄に不整合があります');
+    const dates=[...new Set(history.map(r=>r[hDate]).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d) && d<scanDate))].sort();
+    const priorDate=dates.at(-1), prior=new Set(), older=new Set(), latest=[];
+    const recentDates=[...dates,scanDate].slice(-5).reverse();
+    const byDate=new Map(recentDates.map(d=>[d,[]]));
+    for(const row of history){
+      const date=row[hDate], ticker=row[hTicker];
+      if(ticker==='(該当なし)') continue;
+      if(!/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker)) continue;
+      if(byDate.has(date)) byDate.get(date).push(ticker);
+      if(date===scanDate) latest.push(ticker);
+      else if(date===priorDate) prior.add(ticker);
+      else if(date<scanDate) older.add(ticker);
+    }
+    if(latest.length!==all.length || all.some(t=>!latest.includes(t)))
+      throw new Error('銘柄履歴と候補が一致しません');
+    if(recentDates.some(d=>new Set(byDate.get(d)).size!==byDate.get(d).length))
+      throw new Error('日付別候補に重複があります');
+    const fresh=all.filter(t=>!prior.has(t) && !older.has(t));
+    const reentry=all.filter(t=>!prior.has(t) && older.has(t));
+    const previous=store.get('mychart-ibd-scan-date',null);
+    const nextLists=lists.filter(L=>!/^ibd:date:\d{4}-\d{2}-\d{2}$/.test(L.source||'') || recentDates.includes(L.source.slice(9)));
+    [all,fresh,reentry].forEach((tickers,i)=>{
+      const spec=IBD_LISTS[i], index=nextLists.findIndex(L=>L.source===spec.source);
+      if(index>=0) nextLists[index]={...nextLists[index],tickers};
+      else nextLists.push({id:spec.source,name:spec.name,source:spec.source,tickers});
+    });
+    recentDates.forEach(date=>{
+      const source='ibd:date:'+date, tickers=byDate.get(date);
+      const name=date.slice(5).replace('-','/')+' ('+tickers.length+')';
+      const index=nextLists.findIndex(L=>L.source===source);
+      if(index>=0) nextLists[index]={...nextLists[index],name,tickers};
+      else nextLists.push({id:source,name,source,tickers});
+    });
+    if(!store.set('mychart-lists',nextLists)) throw new Error('端末への保存に失敗');
+    lists=nextLists;
+    if(!lists.some(L=>L.id===activeListId)){
+      activeListId='ibd:all'; store.set('mychart-active-list',activeListId);
+    }
+    if(previous!==scanDate) reentry.forEach(t=>delete ibdReviewed[t]);
+    store.set('mychart-ibd-scan-date',scanDate);
+    store.set('mychart-ibd-reviewed',ibdReviewed);
+    refreshRussellView();
+    const old=Date.now()-Date.parse(scanDate+'T00:00:00Z')>=3*86400000;
+    ibdMessage('急伸 '+scanDate+'：候補'+all.length+'・初登場'+fresh.length+'・再登場'+reentry.length+
+      (old?'（3日以上前の結果）':''),old);
+  }catch(e){
+    const last=store.get('mychart-ibd-scan-date',null);
+    ibdMessage('同期できません（'+(e&&e.message||'通信エラー')+'）。'+
+      (last?'前回 '+last+' の候補を保持':'既存リストはそのまま'),true);
+  }finally{ ibdBusy=false; }
 }
 /* =========================================================
    セクターの判定: ETF保有銘柄 > ラッセルの業種列 > 不明。
@@ -3813,7 +3920,28 @@ function priceOf(ticker){
 /* リスト切り替えタブ（＋新規 / ✎名前変更 / 🗑削除） */
 function renderTabs(){
   const tabs=$('listTabs'); tabs.innerHTML='';
-  lists.forEach(L=>{
+  const groupOf=L=>isIbdList(L)?'ibd':isRussellList(L)?'russell':'manual';
+  const group=groupOf(activeList());
+  const groups=$('listGroups'); groups.innerHTML='';
+  [['manual','マイリスト'],['russell','ラッセル'],['ibd','急伸']].forEach(([key,name])=>{
+    const button=document.createElement('button');
+    button.className='chip'+(group===key?' active':''); button.textContent=name;
+    button.addEventListener('click',()=>{
+      const first=lists.find(L=>groupOf(L)===key);
+      if(!first) return;
+      activeListId=first.id; store.set('mychart-active-list',activeListId);
+      renderTabs(); renderList();
+    });
+    groups.appendChild(button);
+  });
+  $('russellSync').hidden=group!=='russell';
+  $('ibdSync').hidden=group!=='ibd';
+  const visible=lists.filter(L=>groupOf(L)===group);
+  if(group==='ibd') visible.sort((a,b)=>{
+    const ai=IBD_LISTS.findIndex(x=>x.source===a.source), bi=IBD_LISTS.findIndex(x=>x.source===b.source);
+    return ai>=0&&bi>=0?ai-bi:ai>=0?-1:bi>=0?1:b.source.localeCompare(a.source);
+  });
+  visible.forEach(L=>{
     const c=document.createElement('button');
     c.className='chip'+(L.id===activeListId?' active':'');
     c.textContent=L.name;
@@ -3823,6 +3951,7 @@ function renderTabs(){
     });
     tabs.appendChild(c);
   });
+  if(group!=='manual') return;
   // ＋ 新しいリストを作る
   const add=document.createElement('button'); add.className='chip mini'; add.textContent='＋';
   add.addEventListener('click',()=>{
@@ -3836,7 +3965,7 @@ function renderTabs(){
   });
   tabs.appendChild(add);
   // 同期で管理するリストは内容と名前を直接変更できない。
-  if(isRussellList(activeList())) return;
+  if(isAutoList(activeList())) return;
   // ✎ いま開いているリストの名前を変える
   const ren=document.createElement('button'); ren.className='chip mini'; ren.textContent='✎';
   ren.addEventListener('click',()=>{
@@ -3848,7 +3977,7 @@ function renderTabs(){
   });
   tabs.appendChild(ren);
   // 🗑 いま開いているリストを削除（1回目のタップで確認、もう一度タップで実行）
-  if(lists.filter(L=>!isRussellList(L)).length>1){
+  if(lists.filter(L=>!isAutoList(L)).length>1){
     const del=document.createElement('button'); del.className='chip mini'; del.textContent='🗑';
     let armed=false;
     del.addEventListener('click',()=>{
@@ -3879,7 +4008,7 @@ function renderList(){
   const list=$('list'); list.innerHTML='';
   const my=++listRenderToken;
   const tickers=activeList().tickers;
-  if(!tickers.length){ list.appendChild(label(isRussellList(activeList()) ? '該当銘柄なし' : '「＋追加」で銘柄を入れてください')); return; }
+  if(!tickers.length){ list.appendChild(label(isAutoList(activeList()) ? '該当銘柄なし' : '「＋追加」で銘柄を入れてください')); return; }
   const fav=tickers.filter(t=>isFav(t)), oth=tickers.filter(t=>!isFav(t));
   const items=[];
   if(fav.length){ items.push({label:'★ お気に入り'}); fav.forEach(t=>items.push({t})); items.push({label:'リストの銘柄'}); }
@@ -3903,7 +4032,7 @@ function renderList(){
 function label(t){ const d=document.createElement('div'); d.className='sec-label'; d.textContent=t; return d; }
 function rowEl(s){
   const pr=priceOf(s.ticker);
-  const row=document.createElement('div'); row.className='row'+(isRussellList(activeList())?' auto':'')+(s.ticker===current.ticker?' active':'');
+  const row=document.createElement('div'); row.className='row'+(isAutoList(activeList())?' auto':'')+(s.ticker===current.ticker?' active':'');
   row.innerHTML=`
     <div class="star ${isFav(s.ticker)?'on':''}" data-star="${s.ticker}">${isFav(s.ticker)?'★':'☆'}</div>
     <div><div class="tk">${s.ticker}</div><div class="nm">${s.name}</div></div>
@@ -3911,12 +4040,12 @@ function rowEl(s){
       ? `<div class="price">${fmtPrice(pr.price)}</div>
          <div class="chg ${pr.chg>=0?'up':'down'}">${pr.chg>=0?'+':''}${pr.chg.toFixed(2)}%</div>`
       : `<div class="price" style="opacity:.35" title="チャートを開くと価格を取得します">—</div>` }</div>
-    ${isRussellList(activeList())
-      ? `<div class="auto-actions"><button data-watch="${s.ticker}" type="button">監視へ</button><button data-review="${s.ticker}" type="button" class="${russellReviewed[s.ticker]?'reviewed':''}">${russellReviewed[s.ticker]?'✓確認済':'未確認'}</button></div>`
+    ${isAutoList(activeList())
+      ? `<div class="auto-actions"><button data-watch="${s.ticker}" type="button">監視へ</button><button data-review="${s.ticker}" type="button" class="${reviewedFor(activeList())[s.ticker]?'reviewed':''}">${reviewedFor(activeList())[s.ticker]?'✓確認済':'未確認'}</button></div>`
       : `<div class="del" data-move="${s.ticker}" title="別のリストへ移動">⇄</div><div class="del" data-del="${s.ticker}">×</div>`}`;
   row.addEventListener('click',e=>{
-    if(e.target.dataset.watch){ watchRussellTicker(s.ticker); return; }
-    if(e.target.dataset.review){ russellReviewed[s.ticker]=!russellReviewed[s.ticker]; store.set('mychart-russell-reviewed',russellReviewed); renderList(); return; }
+    if(e.target.dataset.watch){ watchAutoTicker(s.ticker,activeList().source); return; }
+    if(e.target.dataset.review){ const L=activeList(), reviewed=reviewedFor(L); reviewed[s.ticker]=!reviewed[s.ticker]; store.set(reviewKey(L),reviewed); renderList(); return; }
     if(e.target.dataset.star){ toggleFav(s.ticker); return; }      // ☆をタップ→お気に入り
     if(e.target.dataset.move){ moveSymbol(s.ticker); return; }     // ⇄をタップ→別リストへ移動
     if(e.target.dataset.del){ removeSymbol(s.ticker); return; }    // ×をタップ→このリストから外す
@@ -3966,8 +4095,8 @@ function showTicker(v){
 function addSymbol(v){
   const ts=parseTickers(v); if(!ts.length) return;
   let L=activeList();
-  if(isRussellList(L)){
-    L=lists.find(x=>!isRussellList(x));
+  if(isAutoList(L)){
+    L=lists.find(x=>!isAutoList(x));
     if(!L){ L={id:Date.now(),name:'メイン',tickers:[]}; lists.push(L); saveLists(); }
     activeListId=L.id; store.set('mychart-active-list',activeListId);
     renderTabs();
@@ -4298,6 +4427,7 @@ const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-las
   'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
   'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
   'mychart-russell-reviewed','mychart-russell-scan-date',
+  'mychart-ibd-reviewed','mychart-ibd-scan-date',
   'mychart-sector-overrides',
   'mychart-logscale','mychart-tools-open','mychart-api-count','mychart-magnet','mychart-api-times','mychart-bar-position','mychart-vp-view','mychart-bar-tools','mychart-pane-view'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
 
@@ -4512,6 +4642,8 @@ setTimeout(()=>{ const f=$('foot'); if(f) f.textContent='起動しました  '+A
 refreshRussellView=()=>{ renderTabs(); renderList(); };
 $('russellRefresh').addEventListener('click',syncRussell);
 syncRussell(); // チャート起動を待たせず候補だけ更新
+$('ibdRefresh').addEventListener('click',syncIbd);
+syncIbd(); // 急伸候補も手動リストとは独立して同期
 if(store.get('mychart-max', false)) setMax(true);   // 前回「最大化」なら復元
 } // main() ここまで
 
