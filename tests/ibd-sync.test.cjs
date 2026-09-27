@@ -12,7 +12,8 @@ const source = html.slice(start, end);
 
 function fixture(current = ['AAPL', 'NVDA', 'MSFT']) {
   const date = '2026-09-24';
-  const history = ['date,ticker', '2026-09-22,MSFT', '2026-09-23,AAPL',
+  const history = ['date,ticker', '2026-09-18,GOOG', '2026-09-19,(該当なし)',
+    '2026-09-21,TSLA', '2026-09-22,MSFT', '2026-09-23,AAPL',
     ...current.map(t => `${date},${t}`)];
   if (!current.length) history.push(`${date},(該当なし)`);
   return {
@@ -31,7 +32,7 @@ function setup(files) {
   const nodes = Object.fromEntries(['ibdSync','ibdSyncText','russellSync','russellSyncText']
     .map(id=>[id,{textContent:'',classList:{toggle(){}}}]));
   const context = {
-    lists:[manual,russell],
+    lists:[manual,russell],activeListId:1,
     store:{get(k,fallback){return saved.has(k)?saved.get(k):fallback;},
       set(k,v){saved.set(k,structuredClone(v));return true;}},
     document:{getElementById(id){return nodes[id];}},
@@ -54,6 +55,10 @@ test('IBD candidates, first appearances and reentries sync without changing othe
   assert.deepEqual(lists.find(x=>x.source==='ibd:all').tickers,['AAPL','NVDA','MSFT']);
   assert.deepEqual(lists.find(x=>x.source==='ibd:new').tickers,['NVDA']);
   assert.deepEqual(lists.find(x=>x.source==='ibd:reentry').tickers,['MSFT']);
+  assert.deepEqual(lists.filter(x=>x.source?.startsWith('ibd:date:')).map(x=>x.source).sort(),
+    ['ibd:date:2026-09-19','ibd:date:2026-09-21','ibd:date:2026-09-22','ibd:date:2026-09-23','ibd:date:2026-09-24']);
+  assert.deepEqual(lists.find(x=>x.source==='ibd:date:2026-09-23').tickers,['AAPL']);
+  assert.deepEqual(lists.find(x=>x.source==='ibd:date:2026-09-24').tickers,['AAPL','NVDA','MSFT']);
   assert.deepEqual(lists.find(x=>x.id===1),manual);
   assert.deepEqual(lists.find(x=>x.source==='russell:all'),russell);
   assert.match(nodes.ibdSyncText.textContent,/候補3・初登場1・再登場1/);
@@ -84,6 +89,23 @@ test('a valid zero-candidate scan clears only IBD lists',async()=>{
   const lists=saved.get('mychart-lists');
   assert.deepEqual(lists.find(x=>x.source==='ibd:all').tickers,[]);
   assert.deepEqual(lists.find(x=>x.source==='ibd:new').tickers,[]);
+  assert.deepEqual(lists.find(x=>x.source==='ibd:date:2026-09-24').tickers,[]);
   assert.deepEqual(lists.find(x=>x.source==='russell:all').tickers,['AMD']);
   assert.deepEqual(lists.find(x=>x.id===1).tickers,['TSLA']);
+});
+
+test('new scan keeps five dated lists and drops only the oldest date',async()=>{
+  const files=fixture();
+  const {context,saved}=setup(files);
+  await context.api.syncIbd();
+  files['last_updated.txt']='2026-09-25';
+  files['results.csv']='ticker,sector\nAMD,Technology';
+  files['ticker_history.csv'] += '\n2026-09-25,AMD';
+  files['scan_status.json']=JSON.stringify({ok:true,market_date:'2026-09-25',expected_date:'2026-09-25',coverage:0.95,universe:100,matched:1});
+  await context.api.syncIbd();
+  const lists=saved.get('mychart-lists');
+  assert.deepEqual(lists.filter(x=>x.source?.startsWith('ibd:date:')).map(x=>x.source).sort(),
+    ['ibd:date:2026-09-21','ibd:date:2026-09-22','ibd:date:2026-09-23','ibd:date:2026-09-24','ibd:date:2026-09-25']);
+  assert.deepEqual(lists.find(x=>x.source==='ibd:date:2026-09-25').tickers,['AMD']);
+  assert.deepEqual(lists.find(x=>x.source==='ibd:date:2026-09-24').tickers,['AAPL','NVDA','MSFT']);
 });
