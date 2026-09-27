@@ -140,7 +140,12 @@
   .row .del { color:#5b6472; font-size:17px; padding:0 2px 0 6px; }
   /* 複数ウォッチリストの切り替えタブ（チップ） */
   .listTabs { display:flex; gap:6px; padding:8px 14px 0; flex-wrap:wrap; align-items:center; }
+  .listGroups { display:flex; gap:6px; padding:8px 14px 0; }
+  .listGroups .chip { flex:1; padding:8px 3px; }
+  .listTabs { flex-wrap:nowrap; overflow-x:auto; flex:none; padding-bottom:8px; scrollbar-width:thin; }
+  .listTabs .chip { flex:none; white-space:nowrap; }
   .sync-status { display:flex; align-items:center; gap:8px; padding:8px 14px; color:var(--muted); font-size:12px; line-height:1.5; border-bottom:1px solid var(--line); }
+  .sync-status[hidden] { display:none; }
   .sync-status span { flex:1; min-width:0; }
   .sync-status.warn { color:#f5a623; }
   .sync-status button { flex:none; background:transparent; color:var(--accent); border:0; font-size:12px; padding:6px 4px; cursor:pointer; }
@@ -346,6 +351,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
     </div>
     <div id="russellSync" class="sync-status" aria-live="polite"><span id="russellSyncText">ラッセル候補を確認中…</span> <button id="russellRefresh" type="button">再取得</button></div>
     <div id="ibdSync" class="sync-status" aria-live="polite"><span id="ibdSyncText">急伸候補を確認中…</span> <button id="ibdRefresh" type="button">再取得</button><a href="https://nyokki0204-boop.github.io/ibd-screener/" target="_blank" rel="noopener noreferrer">詳細 ↗</a></div>
+    <div class="listGroups" id="listGroups"></div>
     <div class="listTabs" id="listTabs"></div>
     <div class="list" id="list"></div>
     <div class="backup">
@@ -676,7 +682,7 @@ let refreshRussellView=()=>{}; // main() の画面部品が起動後に接続す
 if(!russellReviewed || typeof russellReviewed!=='object' || Array.isArray(russellReviewed)) russellReviewed={};
 if(!ibdReviewed || typeof ibdReviewed!=='object' || Array.isArray(ibdReviewed)) ibdReviewed={};
 function isRussellList(L){ return !!(L && RUSSELL_LISTS.some(x=>x.source===L.source)); }
-function isIbdList(L){ return !!(L && IBD_LISTS.some(x=>x.source===L.source)); }
+function isIbdList(L){ return !!(L && (IBD_LISTS.some(x=>x.source===L.source) || /^ibd:date:\d{4}-\d{2}-\d{2}$/.test(L.source||''))); }
 function isAutoList(L){ return isRussellList(L) || isIbdList(L); }
 function reviewedFor(L){ return isIbdList(L) ? ibdReviewed : russellReviewed; }
 function reviewKey(L){ return isIbdList(L) ? 'mychart-ibd-reviewed' : 'mychart-russell-reviewed'; }
@@ -817,29 +823,44 @@ async function syncIbd(){
        all.some(t=>!/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(t)) ||
        new Set(all).size!==all.length)
       throw new Error('候補件数または銘柄に不整合があります');
-    const dates=[...new Set(history.map(r=>r[hDate]).filter(d=>d<scanDate))].sort();
+    const dates=[...new Set(history.map(r=>r[hDate]).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d) && d<scanDate))].sort();
     const priorDate=dates.at(-1), prior=new Set(), older=new Set(), latest=[];
+    const recentDates=[...dates,scanDate].slice(-5).reverse();
+    const byDate=new Map(recentDates.map(d=>[d,[]]));
     for(const row of history){
       const date=row[hDate], ticker=row[hTicker];
       if(ticker==='(該当なし)') continue;
       if(!/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker)) continue;
+      if(byDate.has(date)) byDate.get(date).push(ticker);
       if(date===scanDate) latest.push(ticker);
       else if(date===priorDate) prior.add(ticker);
       else if(date<scanDate) older.add(ticker);
     }
     if(latest.length!==all.length || all.some(t=>!latest.includes(t)))
       throw new Error('銘柄履歴と候補が一致しません');
+    if(recentDates.some(d=>new Set(byDate.get(d)).size!==byDate.get(d).length))
+      throw new Error('日付別候補に重複があります');
     const fresh=all.filter(t=>!prior.has(t) && !older.has(t));
     const reentry=all.filter(t=>!prior.has(t) && older.has(t));
     const previous=store.get('mychart-ibd-scan-date',null);
-    const nextLists=lists.slice();
+    const nextLists=lists.filter(L=>!/^ibd:date:\d{4}-\d{2}-\d{2}$/.test(L.source||'') || recentDates.includes(L.source.slice(9)));
     [all,fresh,reentry].forEach((tickers,i)=>{
       const spec=IBD_LISTS[i], index=nextLists.findIndex(L=>L.source===spec.source);
       if(index>=0) nextLists[index]={...nextLists[index],tickers};
       else nextLists.push({id:spec.source,name:spec.name,source:spec.source,tickers});
     });
+    recentDates.forEach(date=>{
+      const source='ibd:date:'+date, tickers=byDate.get(date);
+      const name=date.slice(5).replace('-','/')+' ('+tickers.length+')';
+      const index=nextLists.findIndex(L=>L.source===source);
+      if(index>=0) nextLists[index]={...nextLists[index],name,tickers};
+      else nextLists.push({id:source,name,source,tickers});
+    });
     if(!store.set('mychart-lists',nextLists)) throw new Error('端末への保存に失敗');
     lists=nextLists;
+    if(!lists.some(L=>L.id===activeListId)){
+      activeListId='ibd:all'; store.set('mychart-active-list',activeListId);
+    }
     if(previous!==scanDate) reentry.forEach(t=>delete ibdReviewed[t]);
     store.set('mychart-ibd-scan-date',scanDate);
     store.set('mychart-ibd-reviewed',ibdReviewed);
@@ -3707,7 +3728,28 @@ function priceOf(ticker){
 /* リスト切り替えタブ（＋新規 / ✎名前変更 / 🗑削除） */
 function renderTabs(){
   const tabs=$('listTabs'); tabs.innerHTML='';
-  lists.forEach(L=>{
+  const groupOf=L=>isIbdList(L)?'ibd':isRussellList(L)?'russell':'manual';
+  const group=groupOf(activeList());
+  const groups=$('listGroups'); groups.innerHTML='';
+  [['manual','マイリスト'],['russell','ラッセル'],['ibd','急伸']].forEach(([key,name])=>{
+    const button=document.createElement('button');
+    button.className='chip'+(group===key?' active':''); button.textContent=name;
+    button.addEventListener('click',()=>{
+      const first=lists.find(L=>groupOf(L)===key);
+      if(!first) return;
+      activeListId=first.id; store.set('mychart-active-list',activeListId);
+      renderTabs(); renderList();
+    });
+    groups.appendChild(button);
+  });
+  $('russellSync').hidden=group!=='russell';
+  $('ibdSync').hidden=group!=='ibd';
+  const visible=lists.filter(L=>groupOf(L)===group);
+  if(group==='ibd') visible.sort((a,b)=>{
+    const ai=IBD_LISTS.findIndex(x=>x.source===a.source), bi=IBD_LISTS.findIndex(x=>x.source===b.source);
+    return ai>=0&&bi>=0?ai-bi:ai>=0?-1:bi>=0?1:b.source.localeCompare(a.source);
+  });
+  visible.forEach(L=>{
     const c=document.createElement('button');
     c.className='chip'+(L.id===activeListId?' active':'');
     c.textContent=L.name;
@@ -3717,6 +3759,7 @@ function renderTabs(){
     });
     tabs.appendChild(c);
   });
+  if(group!=='manual') return;
   // ＋ 新しいリストを作る
   const add=document.createElement('button'); add.className='chip mini'; add.textContent='＋';
   add.addEventListener('click',()=>{
