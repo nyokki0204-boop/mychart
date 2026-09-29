@@ -61,6 +61,32 @@ test('quarterly EPS and revenue use matching fiscal periods and valid numbers',(
   assert.equal(ctx.fundPercent(0,-1),'赤字解消');
 });
 
+test('chart earnings summary uses the latest fiscal period and matching revenue',()=>{
+  const ctx=vm.createContext({
+    store:{get:()=> 'test-key'},
+    earningsCache:()=>({rows:[
+      {period:'2026-06-30',eps:1.5},
+      {period:'2025-06-30',eps:1}
+    ]}),
+    revenueCache:()=>({rows:[
+      {period:'2026-09-30',revenue:300},
+      {period:'2026-06-30',revenue:120},
+      {period:'2025-06-30',revenue:100}
+    ]})
+  });
+  vm.runInContext(section('function fundNumber(n,digits=2){','function fundText(parent,tag,value,cls){'),ctx);
+  vm.runInContext(section('function earningsChipSummary(ticker){','async function fetchEarnings(ticker, part, key){'),ctx);
+  assert.equal(ctx.earningsChipSummary('PD').text,'前年比 EPS +50.0%・売上 +20.0%');
+  ctx.revenueCache=()=>({rows:[{period:'2026-09-30',revenue:300}]});
+  assert.equal(ctx.earningsChipSummary('PD').text,'前年比 EPS +50.0%');
+  ctx.earningsCache=()=>null;
+  assert.equal(ctx.earningsChipSummary('PD'),null);
+  ctx.earningsCache=()=>({rows:[{period:'2026-06-30',eps:1.5}]});
+  assert.equal(ctx.earningsChipSummary('PD').text,'直近実績 EPS 1.50');
+  ctx.store={get:()=>''};
+  assert.equal(ctx.earningsChipSummary('PD'),null);
+});
+
 test('stock relative performance compares matching trading dates only',()=>{
   const ctx=vm.createContext({});
   vm.runInContext(section('function stockRelativeReturns(stock,benchmark,weeks){','async function loadStockRs(ticker){'),ctx);
