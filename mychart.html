@@ -285,7 +285,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 #fundBack .modal{width:94%;max-width:480px;max-height:88dvh}
 #fundBody{overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch;font-size:12px;line-height:1.5}
 .fundCard{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:10px;background:#111722}
-.fundCard h3{margin:0 0 6px;font-size:13px}.fundCard p{margin:4px 0}
+.fundCard h3{margin:0 0 6px;font-size:13px}.fundCard p{margin:3px 0}
 .fundGood{color:#26a69a}.fundBad{color:#ef5350}.fundMuted{color:#a8b3c5}
 #fundBody button{min-height:36px;background:#253046;border:1px solid #394356;border-radius:6px;color:var(--text);padding:5px 9px}
 #fundBack .mbtns button{background:#2a3242;color:var(--text)}
@@ -528,7 +528,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v62 (決算の簡易表示)';
+const APP_VERSION='v63 (決算履歴を見やすく)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2360,8 +2360,10 @@ function renderFundPanel(){
   }
   const history=earningsCache(ticker,'history'), rows=history?.rows||[];
   const revenueRecord=revenueCache(ticker), revenue=revenueRecord?.rows||[];
-  if(history) fundText(body,'p','決算履歴の最終取得 '+new Date(history.at).toLocaleDateString('ja-JP'),'fundMuted');
-  if(revenueRecord) fundText(body,'p','売上高の最終取得 '+new Date(revenueRecord.at).toLocaleDateString('ja-JP'),'fundMuted');
+  if(history || revenueRecord) fundText(body,'p','最終取得：'+[
+    history && '決算 '+new Date(history.at).toLocaleDateString('ja-JP'),
+    revenueRecord && '売上 '+new Date(revenueRecord.at).toLocaleDateString('ja-JP')
+  ].filter(Boolean).join(' ／ '),'fundMuted');
   if(!rows.length){fundText(body,'p',earningsPending.has(ticker)?'決算履歴を取得中…':'決算履歴がありません（未取得または対象外）。');}
   if(!revenue.length) fundText(body,'p',revenuePending.has(ticker)?'売上高を取得中…':'売上高は未取得です。数値は判定しません。','fundMuted');
   const recent=rows.slice(0,3);
@@ -2395,26 +2397,8 @@ function renderFundPanel(){
         (rev.revenue>expected?'予想超え':rev.revenue<expected?'予想未達':'予想通り'),
         rev.revenue>expected?'fundGood':rev.revenue<expected?'fundBad':'');
     }else fundText(card,'p',rev && rev.currency && rev.currency!=='USD'
-      ? '売上高の予想比：報告通貨がUSDではないため未判定'
-      : '売上高の予想比：発表前の保存値なし','fundMuted');
-    const guide=store.get(fundGuideKey(ticker,r.period),null);
-    for(const [label,field] of [['次期EPS','nextEps'],['次期売上高','nextRevenue']]){
-      const actual=finiteMetric(guide?.[field]), expected=before?finiteMetric(snapshot[field]):null;
-      fundText(card,'p',label+'ガイダンス：'+(actual==null?'—':fundNumber(actual))+
-        ' ／ 発表前予想 '+fundNumber(expected)+' ｜ '+
-        (actual==null||expected==null?'判定不可':actual>expected?'予想超え':actual<expected?'予想未達':'予想通り'),
-        actual!=null&&expected!=null?(actual>expected?'fundGood':actual<expected?'fundBad':''):'fundMuted');
-    }
-    fundText(card,'p','EPSはAlpha Vantageの実績・予想。売上高は四半期損益計算書。保存した予想とガイダンスは手入力。','fundMuted');
-    if(snapshot?.url && /^https:\/\//i.test(snapshot.url)){
-      const a=fundText(card,'a','保存した予想の参照先 ↗');a.href=snapshot.url;a.target='_blank';a.rel='noopener noreferrer';
-      card.appendChild(document.createElement('br'));
-    }
-    if(guide?.url && /^https:\/\//i.test(guide.url)){
-      const a=fundText(card,'a','入力した資料 ↗');a.href=guide.url;a.target='_blank';a.rel='noopener noreferrer';
-    }
-    const edit=fundText(card,'button','ガイダンスを記録');edit.type='button';
-    edit.onclick=()=>showFundForm(card,ticker,r.period,'guidance',guide||{});
+      ? '売上高予想比 —（通貨が異なるため未判定）'
+      : '売上高予想比 —（発表前の予想なし）','fundMuted');
   }
   const cal=earningsCache(ticker,'calendar');
   const today=new Date().toISOString().slice(0,10);
