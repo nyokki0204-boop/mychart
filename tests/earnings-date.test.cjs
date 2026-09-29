@@ -64,6 +64,7 @@ test('quarterly EPS and revenue use matching fiscal periods and valid numbers',(
 test('chart earnings summary uses the latest fiscal period and matching revenue',()=>{
   const ctx=vm.createContext({
     store:{get:()=> 'test-key'},
+    fundSnapshotKey:()=> 'snapshot',
     earningsCache:()=>({rows:[
       {period:'2026-06-30',eps:1.5},
       {period:'2025-06-30',eps:1}
@@ -76,13 +77,29 @@ test('chart earnings summary uses the latest fiscal period and matching revenue'
   });
   vm.runInContext(section('function fundNumber(n,digits=2){','function fundText(parent,tag,value,cls){'),ctx);
   vm.runInContext(section('function earningsChipSummary(ticker){','async function fetchEarnings(ticker, part, key){'),ctx);
-  assert.equal(ctx.earningsChipSummary('PD').text,'前年比 EPS +50.0%・売上 +20.0%');
+  assert.equal(ctx.earningsChipSummary('PD').eps,'EPS 前年比 +50.0%');
+  assert.equal(ctx.earningsChipSummary('PD').sales,'売上 前年比 +20.0%');
+  const snapshot={at:Date.parse('2026-08-01T00:00:00Z'),eps:1.2,revenue:100};
+  ctx.earningsCache=()=>({rows:[
+    {period:'2026-06-30',date:'2026-08-05',eps:1.5,estimate:1.1},
+    {period:'2025-06-30',eps:1}
+  ]});
+  ctx.revenueCache=()=>({rows:[
+    {period:'2026-06-30',revenue:120e9,currency:'USD'},
+    {period:'2025-06-30',revenue:100e9,currency:'USD'}
+  ]});
+  ctx.store={get:k=>k==='av-key'?'test-key':snapshot};
+  assert.equal(ctx.earningsChipSummary('PD').eps,'EPS 予想比 +25.0%・前年比 +50.0%');
+  assert.equal(ctx.earningsChipSummary('PD').sales,'売上 予想比 +20.0%・前年比 +20.0%');
+  ctx.store={get:k=>k==='av-key'?'test-key':null};
+  assert.equal(ctx.earningsChipSummary('PD').eps,'EPS 予想比 +36.4%・前年比 +50.0%');
+  assert.equal(ctx.earningsChipSummary('PD').sales,'売上 前年比 +20.0%');
   ctx.revenueCache=()=>({rows:[{period:'2026-09-30',revenue:300}]});
-  assert.equal(ctx.earningsChipSummary('PD').text,'前年比 EPS +50.0%');
+  assert.equal(ctx.earningsChipSummary('PD').sales,'');
   ctx.earningsCache=()=>null;
   assert.equal(ctx.earningsChipSummary('PD'),null);
   ctx.earningsCache=()=>({rows:[{period:'2026-06-30',eps:1.5}]});
-  assert.equal(ctx.earningsChipSummary('PD').text,'直近実績 EPS 1.50');
+  assert.equal(ctx.earningsChipSummary('PD').eps,'EPS 実績 1.50');
   ctx.store={get:()=>''};
   assert.equal(ctx.earningsChipSummary('PD'),null);
 });
