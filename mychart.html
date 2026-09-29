@@ -277,9 +277,11 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 #sectorPanel .sector-actions{display:flex;gap:6px;margin-top:7px}#sectorPanel .sector-actions button{flex:1;min-height:40px;
   background:#233044;color:var(--text);border:1px solid #394356;border-radius:6px;font-size:12px}
 #sectorPanel .sector-actions button:first-child{background:var(--accent);border-color:var(--accent);color:#fff}
-#earningsChip{position:absolute;right:7px;bottom:72px;z-index:8;max-width:min(210px,60vw);min-height:30px;
+#earningsChip{position:absolute;right:7px;bottom:72px;z-index:8;max-width:min(220px,calc(100% - 14px));min-height:30px;
   padding:5px 8px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);
-  color:var(--text);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  color:var(--text);font-size:11px;font-weight:600;text-align:left;cursor:pointer}
+#earningsChip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#earningsChip .earningsSummary{color:#a8b3c5;font-size:10px;margin-top:2px}
 #fundBack .modal{width:94%;max-width:480px;max-height:88dvh}
 #fundBody{overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch;font-size:12px;line-height:1.5}
 .fundCard{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:10px;background:#111722}
@@ -372,7 +374,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
           <div class="sector-actions"><button id="sectorSave" type="button">指定を保存</button><button id="sectorReset" type="button">自動判定に戻す</button></div>
         </section>
       </div>
-      <button id="earningsChip" type="button" title="決算日を確認">決算日: キー未設定</button>
+      <button id="earningsChip" type="button" title="決算と業績を確認">決算予定: 未確認</button>
     <table id="indTable"></table>
     </div>
     <div id="c2pane">
@@ -526,7 +528,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v61 (株価キーの安全対策)';
+const APP_VERSION='v62 (決算の簡易表示)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2096,7 +2098,7 @@ async function loadRevenue(ticker,force=false){
       store.set('mychart-fund-revenue-'+ticker,{at:Date.now(),rows});
       earningsFailures.delete(failureKey);
     }catch(e){ if(key===store.get('av-key','')) earningsFailures.set(failureKey,Date.now()); }
-    if(ticker===current.ticker && $('fundBack').classList.contains('open')) renderFundPanel();
+    if(ticker===current.ticker) showEarnings(ticker);
   })().finally(()=>{if(revenuePending.get(ticker)===task) revenuePending.delete(ticker);});
   revenuePending.set(ticker,task);
 }
@@ -2142,10 +2144,34 @@ function showEarnings(ticker, message){
   const feedDate=feedFresh && feedEvents(ticker).find(e=>e.date>=today)?.date;
   const date=feedDate || (upcoming && Date.now()-upcoming.at<86400000 && upcoming.dates.find(d=>d>=today));
   const chip=$('earningsChip');
-  chip.textContent=date ? '決算予定 '+date.slice(5).replace('-','/') : message || '決算予定: 未確認';
-  chip.title=date ? ticker+' 決算予定 '+date+'（変更の可能性あり・'+(feedDate?'Finnhub':'Alpha Vantage')+'）' : chip.textContent;
+  const label=date ? '次回決算 '+date.slice(5).replace('-','/') : message || '決算予定: 未確認';
+  const summary=earningsChipSummary(ticker);
+  const first=document.createElement('span'); first.textContent=label;
+  chip.replaceChildren(first);
+  if(summary){
+    const second=document.createElement('span'); second.className='earningsSummary'; second.textContent=summary.text;
+    chip.appendChild(second);
+  }
+  chip.title=[date ? ticker+' 決算予定 '+date+'（変更の可能性あり・'+(feedDate?'Finnhub':'Alpha Vantage')+'）' : label,
+    summary?.title].filter(Boolean).join(' ｜ ');
   redrawOverlay(); layoutOverlay();
   if($('fundBack').classList.contains('open')) renderFundPanel();
+}
+function earningsChipSummary(ticker){
+  if(!store.get('av-key','')) return null;
+  const rows=earningsCache(ticker,'history')?.rows||[];
+  const latest=rows[0]; if(!latest) return null;
+  const revenue=revenueCache(ticker)?.rows||[];
+  const revIndex=revenue.findIndex(r=>r.period===latest.period);
+  const epsYoY=fundYoY(rows,0,'eps');
+  const salesYoY=revIndex<0?'—':fundYoY(revenue,revIndex,'revenue');
+  const parts=[];
+  if(epsYoY!=='—') parts.push('EPS '+epsYoY);
+  if(salesYoY!=='—') parts.push('売上 '+salesYoY);
+  let basis='前年比';
+  if(!parts.length && latest.eps!=null){parts.push('EPS '+fundNumber(latest.eps));basis='直近実績';}
+  if(!parts.length) return null;
+  return {text:basis+' '+parts.join('・'),title:'直近 '+latest.period+'期：'+basis+' '+parts.join('／')};
 }
 async function fetchEarnings(ticker, part, key){
   const fn=part==='calendar'?'EARNINGS_CALENDAR':'EARNINGS';
