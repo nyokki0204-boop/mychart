@@ -54,6 +54,7 @@
   #lg-date { margin-left:0; color:#fff; }
   /* 当日の足など、まだ確定していない可能性がある足の印 */
   #lg-prov { color:var(--ema); margin-left:4px; font-weight:700; }
+  #lg-delayed { color:var(--down); margin-left:4px; font-weight:700; }
   .legend .up { color:var(--up); } .legend .down { color:var(--down); }
   /* ヘッダーと数値の行は左右スワイプで銘柄切替に使うので、文字選択を無効に */
   header, .legend { -webkit-user-select:none; user-select:none; touch-action:pan-y; }
@@ -276,6 +277,17 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 #sectorPanel .sector-actions{display:flex;gap:6px;margin-top:7px}#sectorPanel .sector-actions button{flex:1;min-height:40px;
   background:#233044;color:var(--text);border:1px solid #394356;border-radius:6px;font-size:12px}
 #sectorPanel .sector-actions button:first-child{background:var(--accent);border-color:var(--accent);color:#fff}
+#earningsChip{position:absolute;right:7px;bottom:72px;z-index:8;max-width:min(210px,60vw);min-height:30px;
+  padding:5px 8px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);
+  color:var(--text);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#fundBack .modal{width:94%;max-width:480px;max-height:88dvh}
+#fundBody{overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch;font-size:12px;line-height:1.5}
+.fundCard{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:10px;background:#111722}
+.fundCard h3{margin:0 0 6px;font-size:13px}.fundCard p{margin:4px 0}
+.fundGood{color:#26a69a}.fundBad{color:#ef5350}.fundMuted{color:#a8b3c5}
+#fundBody button{min-height:36px;background:#253046;border:1px solid #394356;border-radius:6px;color:var(--text);padding:5px 9px}
+#fundBack .mbtns button{background:#2a3242;color:var(--text)}
+#fundSource{font-size:11px;color:#a8b3c5}
 @media(max-width:380px){#sectorChip{max-width:155px}}
 @media(hover:hover){button:hover{filter:brightness(1.25);background-color:#263247}button:focus-visible{outline:2px solid #81afff}}
 
@@ -360,6 +372,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
           <div class="sector-actions"><button id="sectorSave" type="button">指定を保存</button><button id="sectorReset" type="button">自動判定に戻す</button></div>
         </section>
       </div>
+      <button id="earningsChip" type="button" title="決算日を確認">決算日: キー未設定</button>
     <table id="indTable"></table>
     </div>
     <div id="c2pane">
@@ -406,6 +419,14 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
         <button id="modalCancel">キャンセル</button>
         <button id="modalOk">OK</button>
       </div>
+    </div>
+  </div>
+  <div class="modalBack" id="fundBack" role="dialog" aria-modal="true" aria-label="決算と業績">
+    <div class="modal">
+      <div class="mtitle" id="fundTitle">決算と業績</div>
+      <div id="fundBody"></div>
+      <div id="fundSource">Finnhubの予想・結果とAlpha Vantageの業績履歴。未確認は判定しません。</div>
+      <div class="mbtns"><button id="fundRefresh" type="button">更新</button><button id="fundClose" type="button">閉じる</button></div>
     </div>
   </div>
 
@@ -505,7 +526,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v56 (急伸候補・セクター強度の連携)';
+const APP_VERSION='v60 (SIP価格・決算の定期更新)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -612,7 +633,7 @@ function bundle(bucket, time){
 /* 5分足 → 65分足（同じ日の中で13本ずつ束ねる。9:30開始なら1日ちょうど6本） */
 function to65(rows){
   const candles=[], volumes=[];
-  let bucket=[], curDay='';
+  let bucket=[], curDay='', curSlot=-1;
   const flush=()=>{
     if(!bucket.length) return;
     // 時刻つきの足は「秒数（エポック秒）」で持つのがチャート部品の作法。
@@ -621,15 +642,20 @@ function to65(rows){
     const [dpart,tpart]=dt.split('T');
     const [Y,M,D]=dpart.split('-').map(Number);
     const [h,mi]=(tpart||'00:00').split(':').map(Number);
-    const t=Math.floor(Date.UTC(Y,(M||1)-1,D||1,h||0,mi||0)/1000);
+    const t=bucket[0].epoch || Math.floor(Date.UTC(Y,(M||1)-1,D||1,h||0,mi||0)/1000);
     const b=bundle(bucket, t);
     candles.push(b.candle); volumes.push(b.volume); bucket=[];
   };
   rows.forEach(r=>{
     const day=r.datetime.slice(0,10);
     if(day!==curDay){ flush(); curDay=day; }   // 日が変わったら区切る
+    if(r.epoch){
+      const [,clock='09:30']=r.datetime.split(' '), [hour,minute]=clock.split(':').map(Number);
+      const slot=Math.floor((hour*60+minute-570)/65);
+      if(slot!==curSlot){ flush(); curSlot=slot; }
+    }
     bucket.push(r);
-    if(bucket.length===13) flush();            // 13本たまったら1本に
+    if(!r.epoch && bucket.length===13) flush(); // Twelve Dataの既存集計
   });
   flush();
   return {candles, volumes};
@@ -1047,7 +1073,7 @@ function isSaneRow(v){
   if(!v || typeof v.datetime!=='string' || v.datetime.length<10) return false;
   const o=+v.open, h=+v.high, l=+v.low, c=+v.close;
   if(![o,h,l,c].every(x=>isFinite(x) && x>0)) return false;   // 数値でない・0以下は捨てる
-  if(h<l) return false;                                        // 高値が安値を下回るのは異常
+  if(h<Math.max(o,c) || l>Math.min(o,c)) return false;        // 四本値の関係が矛盾する足は使わない
   return true;
 }
 
@@ -1090,7 +1116,7 @@ function apiErrJa(msg){
   return m;
 }
 
-async function fetchReal(symbol, step){
+async function fetchTwelve(symbol, step){
   const key = store.get('td-key','');
   if(!key) throw { kind:'nokey' };
   await apiGate();   // 上限に当たらないよう順番待ち
@@ -1132,6 +1158,70 @@ async function fetchReal(symbol, step){
   const candles = rows.map(v => ({ time:String(v.datetime).slice(0,10), open:+v.open, high:+v.high, low:+v.low, close:+v.close }));
   const volumes = rows.map(v => ({ time:String(v.datetime).slice(0,10), value:+(v.volume||0) }));
   return { candles, volumes };
+}
+
+function priceProvider(){ return store.get('alpaca-id','') && store.get('alpaca-secret','') ? 'alpaca' : 'twelve'; }
+function priceTicker(ticker){ return ticker+'#'+priceProvider(); }
+const priceRequests=new Map();
+async function fetchReal(symbol, step){
+  const id=symbol+'@'+step+'@'+priceProvider();
+  if(priceRequests.has(id)) return priceRequests.get(id);
+  const task=(priceProvider()==='alpaca'?fetchAlpaca(symbol,step):fetchTwelve(symbol,step))
+    .finally(()=>priceRequests.delete(id));
+  priceRequests.set(id,task);
+  return task;
+}
+function nyStamp(date){
+  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23',weekday:'short'}).formatToParts(date);
+  return Object.fromEntries(parts.map(p=>[p.type,p.value]));
+}
+function nyDay(p){ return p.year+'-'+p.month+'-'+p.day; }
+function priceFresh(kind, at){
+  if(priceProvider()!=='alpaca') return Date.now()-at <= (kind==='65m'?TTL_INTRA:TTL_DAILY);
+  const now=nyStamp(new Date()), then=nyStamp(new Date(at));
+  const minute=+now.hour*60+(+now.minute);
+  const open=!['Sat','Sun'].includes(now.weekday) && minute>=570 && minute<980;
+  if(open) return Date.now()-at < 5*60000;
+  if(kind==='65m' && !['Sat','Sun'].includes(now.weekday) && minute>=980 &&
+     nyDay(then)===nyDay(now) && (+then.hour*60+ +then.minute)<980) return false;
+  // NY深夜の確定版を一度取得し、週末は土曜の確定取得を使い回す。
+  const day=p=>{
+    const d=new Date(nyDay(p)+'T12:00:00Z');
+    if((+p.hour*60+ +p.minute)<30) d.setUTCDate(d.getUTCDate()-1);
+    if(d.getUTCDay()===0) d.setUTCDate(d.getUTCDate()-1);
+    return d.toISOString().slice(0,10);
+  };
+  return day(then)===day(now);
+}
+async function fetchAlpaca(symbol, step){
+  if(!/^[A-Z0-9][A-Z0-9.\-]{0,14}$/.test(symbol)) throw {kind:'api',message:'Alpacaで扱えない銘柄です'};
+  const key=store.get('alpaca-id',''), secret=store.get('alpaca-secret','');
+  if(!key || !secret) throw {kind:'nokey'};
+  const end=new Date(Date.now()-16*60000).toISOString();
+  const start=step==='65m' ? new Date(Date.now()-75*86400000).toISOString() : '2016-01-01';
+  const params=new URLSearchParams({timeframe:step==='65m'?'5Min':'1Day',start,end,
+    adjustment:'split',feed:'sip',limit:'10000'});
+  const bars=[]; let page='';
+  do{
+    if(page) params.set('page_token',page);
+    const resp=await fetch('https://data.alpaca.markets/v2/stocks/'+encodeURIComponent(symbol)+'/bars?'+params,
+      {headers:{'APCA-API-KEY-ID':key,'APCA-API-SECRET-KEY':secret}});
+    if(!resp.ok) throw {kind:'api',message:resp.status===403?'SIP履歴の権限または15分遅延の条件を確認してください':'Alpaca HTTP '+resp.status};
+    const json=await resp.json();
+    if(!Array.isArray(json.bars)) throw {kind:'api',message:'Alpacaの価格データを確認できません'};
+    bars.push(...json.bars); page=json.next_page_token||'';
+    if(bars.length>40000) throw {kind:'api',message:'価格履歴が多すぎます'};
+  }while(page);
+  const rows=bars.map(b=>{
+    const date=new Date(b.t), p=nyStamp(date), minute=+p.hour*60+ +p.minute;
+    if(step==='65m' && (minute<570 || minute>=960 || ['Sat','Sun'].includes(p.weekday))) return null;
+    return {datetime:nyDay(p)+(step==='65m'?' '+p.hour+':'+p.minute:''),
+      epoch:Math.floor(date.getTime()/1000),open:b.o,high:b.h,low:b.l,close:b.c,volume:b.v};
+  }).filter(isSaneRow);
+  if(!rows.length) throw {kind:'api',message:'有効なSIP価格がありません'};
+  if(step==='65m') return to65(rows);
+  return {candles:rows.map(r=>({time:r.datetime,open:r.open,high:r.high,low:r.low,close:r.close})),
+    volumes:rows.map(r=>({time:r.datetime,value:r.volume||0}))};
 }
 
 /* =========================================================
@@ -1384,9 +1474,7 @@ async function idbPrune(){
   const idx=idxLoad(), now=Date.now(), alive=[];
   for(const k of keys){
     const at=idx[k]||0;
-    const ttl=String(k).endsWith('@65m') ? TTL_INTRA : TTL_DAILY;
-    if(now-at>ttl){ await idbDel(k); delete idx[k]; }
-    else alive.push(k);
+    alive.push(k); // 古い足も表示用に残し、上限を超えた時だけ整理する
   }
   if(alive.length>DISK_MAX){
     alive.sort((a,b)=>(idx[a]||0)-(idx[b]||0));
@@ -1417,8 +1505,7 @@ function lsPutRec(k, rec){
     const now=Date.now();
     Object.keys(d).forEach(x=>{
       if(x===k) return;
-      const ttl = x.endsWith('@65m') ? TTL_INTRA : TTL_DAILY;
-      if(now-(d[x].at||0) > ttl) delete d[x];
+      if(now-(d[x].at||0) > 90*86400000) delete d[x];
     });
     const keys=Object.keys(d);
     if(keys.length>LS_MAX){
@@ -1481,7 +1568,7 @@ async function diskRead(ticker, kind){
     if(!rows) return null;
     const ttl = kind==='65m' ? TTL_INTRA : TTL_DAILY;
     const at = rec.at||0;
-    return { rows, at, fresh: (Date.now()-at) <= ttl };
+    return { rows, at, fresh: priceFresh(kind,at) };
   }catch(e){ return null; }
 }
 async function diskGet(ticker, kind){          // 期限内のものだけ返す（従来どおり）
@@ -1495,13 +1582,14 @@ async function diskGet(ticker, kind){          // 期限内のものだけ返す
    まず表示してしまい、順番が回ってきたら取り直して差し替える */
 const bgFetching={};
 function bgRefresh(ticker, kind){
-  const k=ticker+'@'+kind;
+  const k=priceTicker(ticker)+'@'+kind;
   if(bgFetching[k]) return;                     // 二重に取りにいかない
   bgFetching[k]=true;
   (async()=>{
     try{
       const raw=await fetchReal(ticker, kind);
-      await diskPut(ticker, kind, raw);
+      if(k!==priceTicker(ticker)+'@'+kind) return;
+      await diskPut(priceTicker(ticker), kind, raw);
       // メモリ上の古い版を捨てて、見ていれば描き直す
       Object.keys(realCache).forEach(x=>{ if(x.startsWith(ticker+'@')) delete realCache[x]; });
       if(current.ticker===ticker) render();
@@ -1513,16 +1601,16 @@ function bgRefresh(ticker, kind){
 }
 /* 指定した銘柄の保存を消す（「今すぐ最新に」で使う） */
 function diskDropTicker(ticker){
-  const pre=ticker+'@';
+  const matches=k=>String(k).startsWith(ticker+'@') || String(k).startsWith(ticker+'#');
   return idbQueue(async ()=>{
     const keys=await idbKeys();
     if(keys){
       const idx=idxLoad();
-      for(const k of keys){ if(String(k).startsWith(pre)){ await idbDel(k); delete idx[k]; } }
+      for(const k of keys){ if(matches(k)){ await idbDel(k); delete idx[k]; } }
       store.set(IDX_KEY, idx);
     }
     const d=lsLoad(); let hit=false;
-    Object.keys(d).forEach(k=>{ if(k.startsWith(pre)){ delete d[k]; hit=true; } });
+    Object.keys(d).forEach(k=>{ if(matches(k)){ delete d[k]; hit=true; } });
     if(hit) lsSave(d);
   });
 }
@@ -1695,37 +1783,45 @@ async function loadExpr(src, step){
 async function loadData(ticker, step){
   const memKey=ticker+'@'+step;
   memTouch(ticker);
-  if(realCache[memKey]) return realCache[memKey];
+  if(step!=='65m' && realCache[ticker+'@__daily'] &&
+     !priceFresh('1d',realCache[ticker+'@__dailyAt']||0)){
+    Object.keys(realCache).forEach(k=>{if(k.startsWith(ticker+'@')) delete realCache[k];});
+  }
+  if(realCache[memKey] && priceFresh(step,realCache[memKey]._loadedAt)) return realCache[memKey];
+  if(realCache[memKey]){
+    Object.keys(realCache).forEach(k=>{if(k.startsWith(ticker+'@')) delete realCache[k];});
+  }
   // 「TLT/SHY」のような式は、各銘柄を取ってから計算する
   if(looksLikeExpr(ticker)){
     const p=await loadExpr(ticker, step); p._staleAt=0;
-    return realCache[memKey]=p;
+    p._loadedAt=Date.now(); return realCache[memKey]=p;
   }
 
   const kind = step==='65m' ? '65m' : '1d';
 
   if(step==='65m'){
-    const rec=await diskRead(ticker,'65m');
+    const rec=await diskRead(priceTicker(ticker),'65m');
     let raw, staleAt=0;
     if(rec && rec.fresh){ raw=rec.rows; }
     else if(rec){ raw=rec.rows; staleAt=rec.at; bgRefresh(ticker,'65m'); }  // 古くてもまず出す
-    else { raw=await fetchReal(ticker,'65m'); diskPut(ticker,'65m',raw); }
+    else { raw=await fetchReal(ticker,'65m'); diskPut(priceTicker(ticker),'65m',raw); }
     const p=pack(raw); p._staleAt=staleAt;
-    return realCache[memKey]=p;
+    p._loadedAt=Date.now(); return realCache[memKey]=p;
   }
 
   // 日足を用意（端末の保存 → 無ければAPIで1回だけ取得）
   let daily=realCache[ticker+'@__daily'], staleAt=realCache[ticker+'@__staleAt']||0;
   if(!daily){
-    const rec=await diskRead(ticker,'1d');
+    const rec=await diskRead(priceTicker(ticker),'1d');
     if(rec && rec.fresh){ daily=rec.rows; staleAt=0; }
     else if(rec){ daily=rec.rows; staleAt=rec.at; bgRefresh(ticker,'1d'); }  // 古くてもまず出す
-    else { daily=await fetchReal(ticker,'1d'); diskPut(ticker,'1d',daily); staleAt=0; }
+    else { daily=await fetchReal(ticker,'1d'); diskPut(priceTicker(ticker),'1d',daily); staleAt=0; }
     realCache[ticker+'@__daily']=daily;
+    realCache[ticker+'@__dailyAt']=Date.now();
     realCache[ticker+'@__staleAt']=staleAt;
   }
   const p=pack(deriveFrom(daily, step)); p._staleAt=staleAt;
-  return realCache[memKey]=p;
+  p._loadedAt=Date.now(); return realCache[memKey]=p;
 }
 
 /* 「◯分前」の文言 */
@@ -1798,6 +1894,28 @@ const volMASeries=chart.addSeries(LightweightCharts.LineSeries,
    ⑤ 状態＆描画（実データ→ダメならサンプル）
    ========================================================= */
 let current={ ticker:store.get('mychart-last', SYMBOLS[0].ticker), step:'1d' };
+let earningsEvents=[], earningsNodes=[];
+let earningsFeed=null, earningsFeedPending=null;
+function feedEvents(ticker){
+  return Object.values(earningsFeed?.events||{}).filter(e=>e.symbol===ticker)
+    .sort((a,b)=>a.date.localeCompare(b.date));
+}
+function loadEarningsFeed(force=false){
+  if(earningsFeedPending && !force) return earningsFeedPending;
+  earningsFeedPending=fetch('./data/earnings.json',{cache:'no-store'}).then(async res=>{
+    if(!res.ok) throw new Error('決算データ未配信');
+    const data=await res.json();
+    if(data.version!==1 || !data.events || typeof data.events!=='object') throw new Error('決算データ形式');
+    earningsFeed=data;
+    showEarnings(current.ticker);
+  }).catch(()=>{});
+  return earningsFeedPending;
+}
+const earningsPending=new Map();
+const earningsFailures=new Map();
+const revenuePending=new Map();
+const stockRsPending=new Map(),stockRsResults=new Map();
+const FUND_HISTORY_TTL=90*86400000;
 // 2画面目の銘柄。キャッシュの整理でも参照するので、ここで先に用意しておく
 let c2 = { ticker: store.get('mychart-c2', 'SOXX') };
 let favs=store.get('mychart-favs', []);
@@ -1943,6 +2061,408 @@ function rememberView(){
  const a=logicalToTs(r.from),b=logicalToTs(r.to);
  if(Number.isFinite(a)&&Number.isFinite(b)){viewMemory.delete(displayedViewKey);viewMemory.set(displayedViewKey,{a,b});while(viewMemory.size>40)viewMemory.delete(viewMemory.keys().next().value);}
 }
+function validEarningsDate(s){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(s||'')) return false;
+  const d=new Date(s+'T00:00:00Z');
+  return Number.isFinite(d.getTime()) && d.toISOString().slice(0,10)===s;
+}
+function parseEarningsCalendar(csv, ticker){
+  const rows=csvRows(csv), header=rows.shift();
+  if(!header || !header.includes('symbol') || !header.includes('reportDate')) throw new Error('決算予定データの形式を確認できません');
+  const si=header.indexOf('symbol'), di=header.indexOf('reportDate');
+  return rows.filter(r=>String(r[si]).toUpperCase()===ticker && validEarningsDate(r[di]))
+    .map(r=>r[di]).sort();
+}
+function parseCalendarEvents(csv,ticker){
+  const rows=csvRows(csv), header=rows.shift();
+  if(!header || !header.includes('symbol') || !header.includes('reportDate') || !header.includes('fiscalDateEnding'))
+    throw new Error('決算予定データの形式を確認できません');
+  const si=header.indexOf('symbol'), di=header.indexOf('reportDate'), fi=header.indexOf('fiscalDateEnding');
+  return rows.filter(r=>String(r[si]).toUpperCase()===ticker && validEarningsDate(r[di]))
+    .map(r=>({reportDate:r[di],fiscalDateEnding:validEarningsDate(r[fi])?r[fi]:null}))
+    .sort((a,b)=>a.reportDate.localeCompare(b.reportDate));
+}
+function parseEarningsHistory(json){
+  if(!Array.isArray(json.quarterlyEarnings)) throw new Error('決算履歴データの形式を確認できません');
+  return [...new Set(json.quarterlyEarnings.map(r=>r.reportedDate).filter(validEarningsDate))].sort();
+}
+function finiteMetric(v){
+  if(v===null || v===undefined || v==='' || v==='None') return null;
+  const n=Number(v); return Number.isFinite(n)?n:null;
+}
+function parseEarningsRecords(json){
+  if(!Array.isArray(json.quarterlyEarnings)) throw new Error('決算履歴データの形式を確認できません');
+  return json.quarterlyEarnings.filter(r=>validEarningsDate(r.reportedDate)&&validEarningsDate(r.fiscalDateEnding))
+    .map(r=>({date:r.reportedDate,period:r.fiscalDateEnding,eps:finiteMetric(r.reportedEPS),
+      estimate:finiteMetric(r.estimatedEPS)}))
+    .sort((a,b)=>b.period.localeCompare(a.period));
+}
+function parseRevenueReports(json){
+  if(!Array.isArray(json.quarterlyReports)) throw new Error('四半期売上高データの形式を確認できません');
+  return json.quarterlyReports.filter(r=>validEarningsDate(r.fiscalDateEnding))
+    .map(r=>({period:r.fiscalDateEnding,revenue:finiteMetric(r.totalRevenue),currency:r.reportedCurrency||''}))
+    .sort((a,b)=>b.period.localeCompare(a.period));
+}
+function earningsCache(ticker, part){
+  const saved=store.get('mychart-earn-'+part+'-'+ticker,null);
+  return saved && Array.isArray(saved.dates) && Number.isFinite(saved.at) ? saved : null;
+}
+function historyNeedsRefresh(cached,lastEvent,now=Date.now()){
+  if(!cached || !lastEvent || !validEarningsDate(lastEvent.reportDate)) return false;
+  // 予定日当日の引け後発表や日程変更を考慮し、2日待って1回だけ確認する。
+  const due=Date.parse(lastEvent.reportDate+'T00:00:00Z')+2*86400000;
+  return now>=due && cached.at<due &&
+    !cached.rows?.some(r=>r.period===lastEvent.fiscalDateEnding);
+}
+function revenueCache(ticker){
+  const saved=store.get('mychart-fund-revenue-'+ticker,null);
+  return saved && Array.isArray(saved.rows) && Number.isFinite(saved.at) ? saved : null;
+}
+function revenueNeedsRefresh(cached,latest,now=Date.now()){
+  if(!cached || now-cached.at>=FUND_HISTORY_TTL) return true;
+  if(!latest || cached.rows.some(r=>r.period===latest.period)) return false;
+  const due=Date.parse(latest.date+'T00:00:00Z')+2*86400000;
+  return now>=due && (cached.at<due || now-cached.at>=7*86400000);
+}
+async function loadRevenue(ticker,force=false){
+  const key=store.get('av-key',''); if(!key || revenuePending.has(ticker)) return;
+  const cached=revenueCache(ticker);
+  const latest=earningsCache(ticker,'history')?.rows?.[0];
+  if(!force && !revenueNeedsRefresh(cached,latest)) return;
+  const failureKey=ticker+'@revenue';
+  if(!force && Date.now()-(earningsFailures.get(failureKey)||0)<6*3600000) return;
+  const task=(async()=>{
+    try{
+      const url='https://www.alphavantage.co/query?'+new URLSearchParams({function:'INCOME_STATEMENT',symbol:ticker,apikey:key});
+      const resp=await fetch(url,{cache:'no-store'});
+      if(!resp.ok) throw new Error('HTTP '+resp.status);
+      const json=await resp.json();
+      if(json.Note||json.Information||json['Error Message']) throw new Error('API上限またはキーを確認してください');
+      const rows=parseRevenueReports(json);
+      if(key!==store.get('av-key','')) return;
+      store.set('mychart-fund-revenue-'+ticker,{at:Date.now(),rows});
+      earningsFailures.delete(failureKey);
+    }catch(e){ if(key===store.get('av-key','')) earningsFailures.set(failureKey,Date.now()); }
+    if(ticker===current.ticker && $('fundBack').classList.contains('open')) renderFundPanel();
+  })().finally(()=>{if(revenuePending.get(ticker)===task) revenuePending.delete(ticker);});
+  revenuePending.set(ticker,task);
+}
+function stockRelativeReturns(stock,benchmark,weeks){
+  const byDate=new Map(benchmark.map(c=>[String(c.time),c.close]));
+  const common=stock.filter(c=>byDate.has(String(c.time)) && c.close>0 && byDate.get(String(c.time))>0);
+  const end=common.at(-1); if(!end) return null;
+  const target=Date.parse(end.time+'T00:00:00Z')-weeks*7*86400000;
+  const start=common.filter(c=>{
+    const age=target-Date.parse(c.time+'T00:00:00Z'); return age>=0 && age<=7*86400000;
+  }).at(-1);
+  if(!start) return null;
+  const stockPct=(end.close/start.close-1)*100;
+  const benchmarkPct=(byDate.get(end.time)/byDate.get(start.time)-1)*100;
+  return {stockPct,benchmarkPct,diff:stockPct-benchmarkPct,start:start.time,end:end.time};
+}
+async function loadStockRs(ticker){
+  if(!store.get('td-key','') || stockRsPending.has(ticker) || looksLikeExpr(ticker)) return;
+  const old=stockRsResults.get(ticker);
+  if(old && Date.now()-old.at<86400000) return;
+  const task=(async()=>{
+    try{
+      const [stock,spy]=await Promise.all([loadData(ticker,'1d'),loadData('SPY','1d')]);
+      if(stock._staleAt||spy._staleAt) throw new Error('価格が古いため比較できません');
+      const periods={};
+      for(const weeks of [13,26,52]) periods[weeks]=stockRelativeReturns(stock.candles,spy.candles,weeks);
+      stockRsResults.set(ticker,{at:Date.now(),periods});
+    }catch(e){ stockRsResults.set(ticker,{at:Date.now(),error:e.message||'取得できません'}); }
+    if(ticker===current.ticker && $('fundBack').classList.contains('open')) renderFundPanel();
+  })().finally(()=>stockRsPending.delete(ticker));
+  stockRsPending.set(ticker,task);
+}
+function showEarnings(ticker, message){
+  if(ticker!==current.ticker) return;
+  const hasKey=!!store.get('av-key','');
+  const history=hasKey && earningsCache(ticker,'history');
+  earningsEvents=[...new Set([...(history?history.dates:[]),...feedEvents(ticker).map(e=>e.date)])].sort();
+  const upcoming=hasKey && earningsCache(ticker,'calendar');
+  const nyParts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+  const nyPart=type=>nyParts.find(p=>p.type===type).value;
+  const today=nyPart('year')+'-'+nyPart('month')+'-'+nyPart('day');
+  const feedFresh=earningsFeed?.updatedAt && Date.now()-Date.parse(earningsFeed.updatedAt)<3*86400000;
+  const feedDate=feedFresh && feedEvents(ticker).find(e=>e.date>=today)?.date;
+  const date=feedDate || (upcoming && Date.now()-upcoming.at<86400000 && upcoming.dates.find(d=>d>=today));
+  const chip=$('earningsChip');
+  chip.textContent=date ? '決算予定 '+date.slice(5).replace('-','/') : message || '決算予定: 未確認';
+  chip.title=date ? ticker+' 決算予定 '+date+'（変更の可能性あり・'+(feedDate?'Finnhub':'Alpha Vantage')+'）' : chip.textContent;
+  redrawOverlay(); layoutOverlay();
+  if($('fundBack').classList.contains('open')) renderFundPanel();
+}
+async function fetchEarnings(ticker, part, key){
+  const fn=part==='calendar'?'EARNINGS_CALENDAR':'EARNINGS';
+  const url='https://www.alphavantage.co/query?'+new URLSearchParams({function:fn,symbol:ticker,
+    ...(part==='calendar'?{horizon:'12month'}:{}),apikey:key});
+  const resp=await fetch(url,{cache:'no-store'});
+  if(!resp.ok) throw new Error('HTTP '+resp.status);
+  const body=await resp.text();
+  if(part==='calendar'){
+    const events=parseCalendarEvents(body,ticker);
+    return {dates:events.map(e=>e.reportDate),events};
+  }
+  let json; try{json=JSON.parse(body);}catch(e){throw new Error('決算履歴を読み取れません');}
+  if(json.Note || json.Information || json['Error Message']) throw new Error('API上限またはキーを確認してください');
+  const rows=parseEarningsRecords(json);
+  return {dates:parseEarningsHistory(json),rows};
+}
+function refreshEarnings(ticker, force=false){
+  loadEarningsFeed();
+  if(!/^[A-Z0-9][A-Z0-9.\-]{0,14}$/.test(ticker)){
+    showEarnings(ticker,'決算日: この銘柄は対象外'); return;
+  }
+  const key=store.get('av-key','');
+  if(!key){ showEarnings(ticker,earningsFeed?.updatedAt?'決算予定: 未登録':'決算日: キー未設定'); return; }
+  showEarnings(ticker,'決算予定: 取得中…');
+  if(earningsPending.has(ticker)) return;
+  const task=(async()=>{
+    let error=false;
+    for(const [part,ttl] of [['calendar',86400000],['history',FUND_HISTORY_TTL]]){
+      if(part==='calendar' && earningsFeed?.updatedAt && Date.now()-Date.parse(earningsFeed.updatedAt)<3*86400000) continue;
+      const cached=earningsCache(ticker,part);
+      const lastEvent=store.get('mychart-earn-last-event-'+ticker,null);
+      const newReportDue=part==='history' && historyNeedsRefresh(cached,lastEvent);
+      if(!force && cached && Date.now()-cached.at<ttl &&
+        (part!=='history'||Array.isArray(cached.rows)) && !newReportDue) continue;
+      const failureKey=ticker+'@'+part;
+      if(!force && Date.now()-(earningsFailures.get(failureKey)||0)<6*3600000){ error=true; continue; }
+      try{
+        const data=await fetchEarnings(ticker,part,key);
+        if(key!==store.get('av-key','')) return;
+        store.set('mychart-earn-'+part+'-'+ticker,{at:Date.now(),...data});
+        if(part==='calendar' && data.events.length){
+          const old=store.get('mychart-earn-last-event-'+ticker,null);
+          const oldReported=earningsCache(ticker,'history')?.rows?.some(r=>r.period===old?.fiscalDateEnding);
+          if(!old || oldReported || old.fiscalDateEnding===data.events[0].fiscalDateEnding){
+            store.set('mychart-earn-last-event-'+ticker,data.events[0]);
+          }
+        }
+        if(part==='history' && $('fundBack').classList.contains('open')) loadRevenue(ticker);
+        earningsFailures.delete(failureKey);
+      }catch(e){
+        if(key!==store.get('av-key','')) return;
+        error=true; earningsFailures.set(failureKey,Date.now());
+      }
+      showEarnings(ticker,error?'決算日: 取得失敗':'決算予定: 未登録');
+    }
+    showEarnings(ticker,error?'決算日: 取得失敗':'決算予定: 未登録');
+  })().finally(()=>{ if(earningsPending.get(ticker)===task) earningsPending.delete(ticker); });
+  earningsPending.set(ticker,task);
+}
+function earningsBarIndex(date){
+  const ts=toEpoch(date), e=epochs, n=e.length;
+  if(!n || ts>e[n-1]+(current.step==='1d'||current.step==='65m'?86400:current.step==='1w'?7*86400:current.step==='1M'?32*86400:190*86400)) return -1;
+  let lo=0,hi=n;
+  while(lo<hi){ const mid=(lo+hi)>>1; if(e[mid]<ts) lo=mid+1; else hi=mid; }
+  if(current.step==='1d') return lo<n && e[lo]-ts<=4*86400 ? lo : -1;
+  if(current.step==='65m') return lo<n && e[lo]-ts<86400 ? lo : -1;
+  return lo<n && e[lo]===ts ? lo : lo-1;
+}
+function buildEarningsMarkers(){
+  earningsNodes=[];
+  if(!store.get('av-key','')) return;
+  for(const date of earningsEvents){
+    const index=earningsBarIndex(date); if(index<0) continue;
+    const group=el('g',{style:'pointer-events:none'});
+    const bg=el('circle',{r:10,fill:'#7c4dff',stroke:'#d1baff','stroke-width':1});
+    const label=el('text',{'text-anchor':'middle','dominant-baseline':'central',fill:'#fff','font-size':11,'font-weight':'700'});
+    label.textContent='決';
+    const title=el('title',{}); title.textContent='決算発表 '+date+'（Alpha Vantage）';
+    group.append(bg,label,title); svg.appendChild(group);
+    earningsNodes.push({group,index});
+  }
+  layoutEarningsMarkers();
+}
+function layoutEarningsMarkers(){
+  const y=Math.max(16,priceAreaHeight()-19), width=$('chart').clientWidth;
+  for(const {group,index} of earningsNodes){
+    const x=Lx(index);
+    group.setAttribute('visibility',x!=null && x>=10 && x<=width-10?'visible':'hidden');
+    if(x!=null) group.setAttribute('transform','translate('+x+','+y+')');
+  }
+}
+function fundNumber(n,digits=2){ return n==null?'—':n.toFixed(digits); }
+function fundPercent(currentValue,previous){
+  if(currentValue==null||previous==null) return '—';
+  if(previous<=0) return previous<0 && currentValue>0?'黒字転換':previous<0 && currentValue===0?'赤字解消':previous<0?'赤字継続':'比較不可';
+  const pct=(currentValue/previous-1)*100;
+  return (pct>=0?'+':'')+pct.toFixed(1)+'%';
+}
+function fundYoY(rows,index,field){
+  const r=rows[index]; if(!r) return '—';
+  const then=Date.parse(r.period+'T00:00:00Z');
+  const older=rows.slice(index+1).filter(x=>{
+    const diff=(then-Date.parse(x.period+'T00:00:00Z'))/86400000;
+    return diff>=350 && diff<=380;
+  }).sort((a,b)=>Math.abs(365-(then-Date.parse(a.period+'T00:00:00Z'))/86400000)
+    -Math.abs(365-(then-Date.parse(b.period+'T00:00:00Z'))/86400000))[0];
+  return older?fundPercent(r[field],older[field]):'—';
+}
+function fundMoney(v,currency){
+  if(v==null) return '—';
+  const abs=Math.abs(v), factor=abs>=1e9?1e9:1e6;
+  return (v/factor).toFixed(2)+(factor===1e9?'B':'M')+(currency?' '+currency:'');
+}
+function fundText(parent,tag,value,cls){
+  const node=document.createElement(tag); node.textContent=value;
+  if(cls) node.className=cls;
+  parent.appendChild(node); return node;
+}
+function fundInput(form,label,name,value=''){
+  const row=document.createElement('label'); row.style.display='block'; row.style.margin='7px 0';
+  row.textContent=label;
+  const input=document.createElement('input'); input.name=name; input.value=value;
+  input.type=name==='url'?'url':'number';
+  if(input.type==='number') input.step='any';
+  input.style.minHeight='38px'; input.style.marginTop='3px';
+  row.appendChild(input); form.appendChild(row);
+}
+function fundSnapshotKey(ticker,period){return 'mychart-fund-snapshot-'+ticker+'-'+period;}
+function fundGuideKey(ticker,period){return 'mychart-fund-guidance-'+ticker+'-'+period;}
+function showFundForm(card,ticker,period,type,defaults={}){
+  const old=card.querySelector('form'); if(old){old.remove();return;}
+  const form=document.createElement('form');
+  if(type==='snapshot'){
+    fundText(form,'p','決算発表前のコンセンサスを記録（Yahoo Financeなどで確認した値）。保存日時を記録します。','fundMuted');
+    fundInput(form,'今回のEPS予想','eps',defaults.eps??'');
+    fundInput(form,'今回の売上高予想（B USD）','revenue',defaults.revenue??'');
+    fundInput(form,'次期EPS予想（ガイダンス比較用）','nextEps',defaults.nextEps??'');
+    fundInput(form,'次期売上高予想（B USD）','nextRevenue',defaults.nextRevenue??'');
+  }else{
+    fundText(form,'p','企業が今回発表した次期ガイダンスを入力。予想との比較には発表前の保存値が必要です。','fundMuted');
+    fundInput(form,'次期EPSガイダンス（会社発表値）','nextEps',defaults.nextEps??'');
+    fundInput(form,'次期売上高ガイダンス（B USD）','nextRevenue',defaults.nextRevenue??'');
+  }
+  fundInput(form,'確認した資料のURL（任意）','url',defaults.url||'');
+  const save=fundText(form,'button','この端末に保存'); save.type='submit';
+  form.onsubmit=e=>{
+    e.preventDefault();
+    const values={at:Date.now(),url:form.elements.url.value.trim()};
+    for(const field of type==='snapshot'?['eps','revenue','nextEps','nextRevenue']:['nextEps','nextRevenue']){
+      values[field]=finiteMetric(form.elements[field].value);
+    }
+    if(values.url && !/^https:\/\//i.test(values.url)){ setFoot('資料のURLは https:// で入力してください');return; }
+    store.set(type==='snapshot'?fundSnapshotKey(ticker,period):fundGuideKey(ticker,period),values);
+    renderFundPanel();
+  };
+  card.appendChild(form);
+}
+function renderFundPanel(){
+  const ticker=current.ticker, body=$('fundBody');
+  $('fundTitle').textContent=ticker+' 決算と業績';
+  body.replaceChildren();
+  const finnhub=feedEvents(ticker).slice(-4).reverse();
+  if(finnhub.length){
+    fundText(body,'p','Finnhub更新 '+new Date(earningsFeed.updatedAt).toLocaleString('ja-JP'),'fundMuted');
+    for(const e of finnhub){
+      const card=document.createElement('section');card.className='fundCard';body.appendChild(card);
+      fundText(card,'h3',(e.date>=new Date().toISOString().slice(0,10)?'決算予定 ':'発表 ')+e.date);
+      const estimate=e.forecast;
+      if(estimate?.eps!=null || estimate?.revenue!=null){
+        fundText(card,'p','発表前に保存した予想（'+estimate.capturedAt.slice(0,10)+'） EPS '+fundNumber(estimate.eps)
+          +' ／ 売上高 '+(estimate.revenue==null?'—':fundMoney(estimate.revenue,'USD')));
+      }else fundText(card,'p','発表前の予想は未保存','fundMuted');
+      if(e.eps!=null || e.revenue!=null){
+        fundText(card,'p','Finnhub結果 EPS '+fundNumber(e.eps)+' ／ 売上高 '
+          +(e.revenue==null?'—':fundMoney(e.revenue,'USD')));
+        if(estimate?.eps!=null && e.eps!=null) fundText(card,'p','EPS '+(e.eps>estimate.eps?'予想超え':e.eps<estimate.eps?'予想未達':'予想通り'));
+        if(estimate?.revenue!=null && e.revenue!=null) fundText(card,'p','売上高 '+(e.revenue>estimate.revenue?'予想超え':e.revenue<estimate.revenue?'予想未達':'予想通り'));
+      }
+      fundText(card,'p','Finnhub内の予想・結果。会計上のEPSとは比較しません。','fundMuted');
+    }
+  }
+  if(!store.get('av-key','')){
+    fundText(body,'p','過去の成長率は⚙でAlpha Vantageのキーを設定すると表示できます。','fundMuted');
+    return;
+  }
+  const history=earningsCache(ticker,'history'), rows=history?.rows||[];
+  const revenueRecord=revenueCache(ticker), revenue=revenueRecord?.rows||[];
+  if(history) fundText(body,'p','決算履歴の最終取得 '+new Date(history.at).toLocaleDateString('ja-JP'),'fundMuted');
+  if(revenueRecord) fundText(body,'p','売上高の最終取得 '+new Date(revenueRecord.at).toLocaleDateString('ja-JP'),'fundMuted');
+  if(!rows.length){fundText(body,'p',earningsPending.has(ticker)?'決算履歴を取得中…':'決算履歴がありません（未取得または対象外）。');}
+  if(!revenue.length) fundText(body,'p',revenuePending.has(ticker)?'売上高を取得中…':'売上高は未取得です。数値は判定しません。','fundMuted');
+  const recent=rows.slice(0,3);
+  const recentEstimates=recent.map(r=>{
+    const s=store.get(fundSnapshotKey(ticker,r.period),null);
+    return s?.eps!=null && s.at && new Date(s.at).toISOString().slice(0,10)<r.date?s.eps:r.estimate;
+  });
+  if(recent.length===3 && recent.every((r,i)=>r.eps!=null&&recentEstimates[i]!=null)){
+    const beats=recent.filter((r,i)=>r.eps>recentEstimates[i]).length;
+    fundText(body,'p','直近3期のEPS予想超え '+beats+'/3期'+(beats===3?'（3期連続）':''),beats===3?'fundGood':'fundMuted');
+  }
+  for(const [index,r] of rows.slice(0,3).entries()){
+    const card=document.createElement('section');card.className='fundCard';body.appendChild(card);
+    fundText(card,'h3',(index===0?'直近':index===1?'1期前':'2期前')+' ｜ '+r.period+'期 ｜ 発表 '+r.date);
+    const snapshot=store.get(fundSnapshotKey(ticker,r.period),null);
+    const before=!!(snapshot && snapshot.at && new Date(snapshot.at).toISOString().slice(0,10)<r.date);
+    const epsEstimate=before && snapshot.eps!=null?snapshot.eps:r.estimate;
+    const surprise=r.eps!=null&&epsEstimate!=null
+      ? (r.eps>epsEstimate?'予想超え':r.eps<epsEstimate?'予想未達':'予想通り') : '判定不可';
+    const surprisePct=r.eps!=null&&epsEstimate!=null&&epsEstimate!==0
+      ? ' ('+((r.eps-epsEstimate)/Math.abs(epsEstimate)*100).toFixed(1)+'%)' : '';
+    fundText(card,'p','EPS '+fundNumber(r.eps)+' ／ '+(before&&snapshot.eps!=null?'発表前の保存予想 ':'履歴の予想 ')+fundNumber(epsEstimate)+' ｜ '+surprise+surprisePct,
+      surprise==='予想超え'?'fundGood':surprise==='予想未達'?'fundBad':'fundMuted');
+    fundText(card,'p','EPS前年同期比 '+fundYoY(rows,rows.indexOf(r),'eps'));
+    const revIndex=revenue.findIndex(x=>x.period===r.period), rev=revenue[revIndex];
+    fundText(card,'p','売上高 '+(rev?fundMoney(rev.revenue,rev.currency):'—')+
+      ' ｜ 前年同期比 '+(rev?fundYoY(revenue,revIndex,'revenue'):'—'));
+    if(before && rev?.revenue!=null && rev.currency==='USD' && snapshot.revenue!=null){
+      const expected=snapshot.revenue*1e9;
+      fundText(card,'p','売上高予想 '+fundMoney(expected,rev.currency)+' ｜ '+
+        (rev.revenue>expected?'予想超え':rev.revenue<expected?'予想未達':'予想通り'),
+        rev.revenue>expected?'fundGood':rev.revenue<expected?'fundBad':'');
+    }else fundText(card,'p',rev && rev.currency && rev.currency!=='USD'
+      ? '売上高の予想比：報告通貨がUSDではないため未判定'
+      : '売上高の予想比：発表前の保存値なし','fundMuted');
+    const guide=store.get(fundGuideKey(ticker,r.period),null);
+    for(const [label,field] of [['次期EPS','nextEps'],['次期売上高','nextRevenue']]){
+      const actual=finiteMetric(guide?.[field]), expected=before?finiteMetric(snapshot[field]):null;
+      fundText(card,'p',label+'ガイダンス：'+(actual==null?'—':fundNumber(actual))+
+        ' ／ 発表前予想 '+fundNumber(expected)+' ｜ '+
+        (actual==null||expected==null?'判定不可':actual>expected?'予想超え':actual<expected?'予想未達':'予想通り'),
+        actual!=null&&expected!=null?(actual>expected?'fundGood':actual<expected?'fundBad':''):'fundMuted');
+    }
+    fundText(card,'p','EPSはAlpha Vantageの実績・予想。売上高は四半期損益計算書。保存した予想とガイダンスは手入力。','fundMuted');
+    if(snapshot?.url && /^https:\/\//i.test(snapshot.url)){
+      const a=fundText(card,'a','保存した予想の参照先 ↗');a.href=snapshot.url;a.target='_blank';a.rel='noopener noreferrer';
+      card.appendChild(document.createElement('br'));
+    }
+    if(guide?.url && /^https:\/\//i.test(guide.url)){
+      const a=fundText(card,'a','入力した資料 ↗');a.href=guide.url;a.target='_blank';a.rel='noopener noreferrer';
+    }
+    const edit=fundText(card,'button','ガイダンスを記録');edit.type='button';
+    edit.onclick=()=>showFundForm(card,ticker,r.period,'guidance',guide||{});
+  }
+  const cal=earningsCache(ticker,'calendar');
+  const today=new Date().toISOString().slice(0,10);
+  const next=cal?.events?.find(e=>e.reportDate>=today && e.fiscalDateEnding);
+  if(next){
+    const card=document.createElement('section');card.className='fundCard';body.appendChild(card);
+    fundText(card,'h3','次回予定 '+next.reportDate+' ｜ '+next.fiscalDateEnding+'期');
+    const snapshot=store.get(fundSnapshotKey(ticker,next.fiscalDateEnding),null);
+    fundText(card,'p',snapshot?'予想を保存済み '+new Date(snapshot.at).toLocaleDateString('ja-JP'):'発表前の予想は未保存',
+      snapshot?'fundGood':'fundMuted');
+    const b=fundText(card,'button','発表前の予想を保存');b.type='button';
+    b.onclick=()=>showFundForm(card,ticker,next.fiscalDateEnding,'snapshot',snapshot||{});
+  }
+  const rs=stockRsResults.get(ticker);
+  const rsCard=document.createElement('section');rsCard.className='fundCard';body.appendChild(rsCard);
+  fundText(rsCard,'h3','株価の相対成績（対SPY）');
+  if(priceProvider()!=='alpaca' && !store.get('td-key','')) fundText(rsCard,'p','株価APIキー未設定のため計算できません。','fundMuted');
+  else if(!rs) fundText(rsCard,'p','価格を取得中…','fundMuted');
+  else if(rs.error) fundText(rsCard,'p','比較できません：'+rs.error,'fundMuted');
+  else for(const weeks of [13,26,52]){
+    const p=rs.periods[weeks];
+    fundText(rsCard,'p',weeks+'週：'+(p?'銘柄 '+fundPercent(1+p.stockPct/100,1)+
+      ' ／ SPY '+fundPercent(1+p.benchmarkPct/100,1)+' ｜ 差 '+(p.diff>=0?'+':'')+p.diff.toFixed(1)+'pt':'期間の価格不足'),
+      p?(p.diff>0?'fundGood':p.diff<0?'fundBad':''):'fundMuted');
+  }
+  fundText(rsCard,'p','同一取引日の終値で比較。株価のみの騰落率で、配当は含みません。IBDのRS順位ではありません。','fundMuted');
+}
 function draw(d){
   rememberView();
   const nextViewKey=current.ticker+'@'+current.step;
@@ -1977,6 +2497,7 @@ function draw(d){
   lastCandle=d.candles[d.candles.length-1]||null; lastVol=d.vols[d.vols.length-1]||null;
   updateLegend(lastCandle,lastVol);
   redrawOverlay();
+  refreshEarnings(current.ticker);
 
   /* 時間足を切り替えた直後は、チャート側の「表示範囲」がまだ前の時間足のまま
      （setVisibleLogicalRange は次の描画まで反映されない）。
@@ -1994,9 +2515,18 @@ function draw(d){
 }
 function setMode(mode, msg){
   const b=$('badge');
-  if(mode==='real'){ b.textContent='リアル'; b.className='badge real'; $('foot').textContent='Twelve Dataの実データを表示中'; }
-  else { b.textContent='サンプル'; b.className='badge sample';
-    $('foot').innerHTML = msg ? `<span class="err">${escHtml(msg)}</span>` : 'サンプル表示中。⚙からAPIキーを入れると実データになります'; }
+  if(mode==='real'){
+    const alpaca=priceProvider()==='alpaca';
+    b.textContent=alpaca?'SIP 15分遅延':'Twelve Data'; b.className='badge real';
+    const last=currentCandles.at(-1)?.time;
+    const stamp=last ? (typeof last==='number'
+      ? new Date(last*1000).toLocaleString('ja-JP',{timeZone:'America/New_York'})+' NY'
+      : String(last)) : '時刻不明';
+    $('foot').textContent=(alpaca?'Alpaca SIP・15分以上遅延':'Twelve Data')+' ｜ 最終足 '+stamp;
+  }else{
+    b.textContent='未取得'; b.className='badge sample';
+    $('foot').textContent=msg||'⚙から価格APIキーを設定してください';
+  }
 }
 
 /* 読み込み中の覆いを出す/消す */
@@ -2020,6 +2550,7 @@ function setLoading(on, msg){
 let renderToken=0;
 async function render(){
   const my=++renderToken;                    // この呼び出しの番号札
+  $('fundBack').classList.remove('open');
   const cacheKey=current.ticker+'@'+current.step;
   const ticker=current.ticker, step=current.step;
   exprMode = looksLikeExpr(ticker);      // 桁数の切り替えに使う
@@ -2028,14 +2559,15 @@ async function render(){
   store.set('mychart-last', ticker);
   closeSectorPanel(); updateSectorContext();
 
-  if(realCache[cacheKey]){
+  if(realCache[cacheKey] && priceFresh(current.step,realCache[cacheKey]._loadedAt)){
     setLoading(false);
     draw(realCache[cacheKey]); setMode('real');
+    if(realCache[cacheKey]._staleAt) setFoot(ageText(realCache[cacheKey]._staleAt)+'の保存データを表示中');
     priceRemember(ticker, realCache[cacheKey].candles);
     return;
   }
 
-  if(store.get('td-key','')){
+  if(priceProvider()==='alpaca' || store.get('td-key','')){
     $('foot').textContent='読み込み中…';
     // 待っている間、前の銘柄のチャートを新しい銘柄だと誤読しないよう覆う
     setLoading(true, ticker+' を読み込み中…\n（表示中のチャートはまだ前の銘柄です）');
@@ -2053,16 +2585,15 @@ async function render(){
       }
     }catch(err){
       if(my!==renderToken) return;
-      draw(sampleDataset(ticker, step));
+      draw({candles:[],vols:[]});
       // 原因を決めつけない。
       // 以前は何が起きても「通信できませんでした（電波の状況をご確認ください）」と
       // 断定して赤字で出していたため、本当の原因（API上限など）が分からず、
       // 画面を見ても何を直せばよいか判断できなかった
-      if(err.kind==='api')        setMode('sample','APIエラー: '+err.message+'（サンプル表示）');
-      else if(err.kind==='nokey') setMode('sample');   // キー未設定はエラーではない
-      else if(looksLikeExpr(ticker)) setMode('sample','式「'+escHtml(ticker)+'」を計算できませんでした: '+(err&&err.message?err.message:''));
-      else if(err && err.message) setMode('sample','取得に失敗しました: '+err.message+'（サンプル表示）');
-      else                        setMode('sample','取得に失敗しました（通信状況をご確認ください）→ サンプル表示');
+      if(err.kind==='api')        setMode('empty','APIエラー: '+err.message);
+      else if(err.kind==='nokey') setMode('empty');
+      else if(err && err.message) setMode('empty','取得に失敗しました: '+err.message);
+      else                        setMode('empty','取得に失敗しました（通信状況をご確認ください）');
     }finally{
       // 覆いは必ず外す。
       // 途中で return する経路（古い応答の破棄）があるので finally に置く。
@@ -2071,7 +2602,7 @@ async function render(){
     }
   } else {
     setLoading(false);
-    draw(sampleDataset(ticker, step)); setMode('sample');
+    draw({candles:[],vols:[]}); setMode('empty');
   }
 }
 
@@ -2188,7 +2719,9 @@ function updateLegend(c,v){
      「出来高が平均の2倍か」の判断を誤らせるため、疑わしい時は印を出す。
      直近20本の中央値の40%未満なら、まだ集計中の可能性が高い */
   let prov='';
-  if(i===currentCandles.length-1 && v && currentVols && currentVols.length>=6){
+  const lastBarAge=(Date.now()-toEpoch(c.time)*1000)/86400000;
+  if(i===currentCandles.length-1 && lastBarAge>=0 && lastBarAge<2 &&
+     v && currentVols && currentVols.length>=6){
     const past=[];
     for(let k=Math.max(0,i-20);k<i;k++) if(currentVols[k] && currentVols[k].value>0) past.push(currentVols[k].value);
     if(past.length>=5){
@@ -2202,6 +2735,12 @@ function updateLegend(c,v){
     if(!pe){ pe=document.createElement('b'); pe.id='lg-prov'; $('lg-date-wrap').appendChild(pe); }
     pe.textContent='速報'; pe.title='この足の出来高はまだ集計中の可能性があります';
   }else if(pe){ pe.textContent=''; }
+  let delayed=$('lg-delayed');
+  const warn=i===currentCandles.length-1 && current.step==='1d' && lastBarAge>3;
+  if(warn){
+    if(!delayed){ delayed=document.createElement('b'); delayed.id='lg-delayed'; $('lg-date-wrap').appendChild(delayed); }
+    delayed.textContent='最終足が古い可能性';
+  }else if(delayed){ delayed.textContent=''; }
 
   updateIndValues(i);   // インジの値も、同じ足のものに合わせる
 }
@@ -2478,14 +3017,13 @@ function runIndicatorCode(ind){
     const st=step||current.step, key=ticker+'@'+st;
     const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close, volume:0}));
     if(realCache[key]) return alignToChart(toArr(realCache[key]));
-    if(!collectingInputs && store.get('td-key','') && !htfFetching[key] && canFetch(key)){
+    if(!collectingInputs && (priceProvider()==='alpaca'||store.get('td-key','')) && !htfFetching[key] && canFetch(key)){
       htfFetching[key]=true;
       loadData(ticker, st).then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
         .catch(e=>{ htfFetching[key]=false; htfFailed[key]=Date.now(); trimMap(htfFailed,200);
           indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; scheduleApplyIndicators(); });
     }
-    if(!collectingInputs && store.get('td-key','')) indSampleFlag=true;
-    return alignToChart(toArr(sampleDataset(ticker, st)));
+    return alignToChart([]);
   };
   // table(セル配列) … 右上にスコア表を出す。cells=[{row,col,text,color,bg}...]
   const table =(cells,opt)=>tables.push({cells, opt:opt||{}});
@@ -2560,7 +3098,7 @@ function htf(step){
   const key=current.ticker+'@'+step;
   const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}));
   if(realCache[key]) return toArr(realCache[key]);
-  if(!collectingInputs && store.get('td-key','') && !htfFetching[key] && canFetch(key)){
+  if(!collectingInputs && (priceProvider()==='alpaca'||store.get('td-key','')) && !htfFetching[key] && canFetch(key)){
     htfFetching[key]=true;
     loadData(current.ticker, step)
       .then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
@@ -2568,8 +3106,7 @@ function htf(step){
         indDataNote=(e&&e.message)?String(e.message).slice(0,60):'取得失敗'; scheduleApplyIndicators(); });
   }
   // APIキーがある＝本物を期待している時だけ「サンプル混入」を警告する
-  if(!collectingInputs && store.get('td-key','')) indSampleFlag=true;
-  return toArr(sampleDataset(current.ticker, step));
+  return currentCandles.map(c=>({time:c.time,open:null,high:null,low:null,close:null}));
 }
 
 /* インジの再計算をまとめて行う。
@@ -3251,8 +3788,8 @@ function buildOne(d){
     svg.appendChild(parts.frame);
     addHandles(parts, d);
   } else { // trend
-    parts.hit=el('line',{stroke:'transparent','stroke-width':28,'data-id':d.id,'data-role':'body',style:'pointer-events:all;cursor:move;touch-action:none'});
-    parts.vis=el('line',{stroke:d.color,style:'pointer-events:none'});
+    parts.hit=el('polyline',{fill:'none',stroke:'transparent','stroke-width':28,'data-id':d.id,'data-role':'body',style:'pointer-events:all;cursor:move;touch-action:none'});
+    parts.vis=el('polyline',{fill:'none',stroke:d.color,style:'pointer-events:none'});
     svg.appendChild(parts.hit); svg.appendChild(parts.vis);
     addHandles(parts, d);
   }
@@ -3398,6 +3935,7 @@ function layoutOneGeometry(d){
   if(!isFinite(d.a.t)||!isFinite(d.b.t)||!isFinite(d.a.p)||!isFinite(d.b.p)){
     showParts(parts,false); return;
   }
+  if(d.type==='trend' && d.a.t===d.b.t){showParts(parts,false);return;}
   const x1=tsToX(d.a.t), y1=Py(d.a.p), x2=tsToX(d.b.t), y2=Py(d.b.p);
   if(x1==null||y1==null||x2==null||y2==null||!isFinite(x1)||!isFinite(x2)||!isFinite(y1)||!isFinite(y2)){
     showParts(parts,false); return;
@@ -3408,6 +3946,22 @@ function layoutOneGeometry(d){
     setPos(parts.body,{x,y,width:w,height:h,'stroke-width':d.width||1.5,'stroke-dasharray':dashOf(d.style)});
     setPos(parts.txt,{x:x+6,y:y+14});
     parts.txt.textContent=statsText(d.a, d.b);   // +3.2% / 値幅 / 本数
+  } else if(d.type==='trend'){
+    // Timeframe changes alter the number and spacing of bars. Interpolate the
+    // price by the saved timestamps so the line has the same value on each chart.
+    const lo=Math.min(d.a.t,d.b.t), hi=Math.max(d.a.t,d.b.t);
+    const times=[lo,...epochs.filter(t=>t>lo&&t<hi),hi];
+    const points=times.map(t=>{
+      const fraction=(t-d.a.t)/(d.b.t-d.a.t);
+      const price=logScale && d.a.p>0 && d.b.p>0
+        ? Math.exp(Math.log(d.a.p)+(Math.log(d.b.p)-Math.log(d.a.p))*fraction)
+        : d.a.p+(d.b.p-d.a.p)*fraction;
+      return {x:tsToX(t),y:Py(price)};
+    });
+    if(points.some(p=>p.x==null||p.y==null||!isFinite(p.x)||!isFinite(p.y))){showParts(parts,false);return;}
+    const pts=points.map(p=>p.x+','+p.y).join(' ');
+    setPos(parts.hit,{points:pts});
+    setPos(parts.vis,{points:pts,'stroke-width':d.width||2,'stroke-dasharray':dashOf(d.style)});
   } else {
     setPos(parts.hit,{x1,y1,x2,y2});
     setPos(parts.vis,{x1,y1,x2,y2,'stroke-width':d.width||2,'stroke-dasharray':dashOf(d.style)});
@@ -3442,6 +3996,7 @@ function redrawOverlay(){
   syncSize();
   while(svg.firstChild) svg.removeChild(svg.firstChild);
   elMap={};
+  buildEarningsMarkers();
   drawings.forEach(d=>{ try{ buildOne(d); }catch(e){ setFoot('描画エラー('+d.type+'): '+e.message); } });
   if(creating){ try{ buildOne(creating); }catch(e){ setFoot('描画エラー: '+e.message); } }  // 引っぱっている最中のプレビュー
   if(pendingPoly && pendingPoly.length){       // 折線の作成途中（点と仮の線）
@@ -3465,6 +4020,7 @@ function redrawOverlay(){
 function layoutOverlay(){
   if(!svg) return;
   syncSize();
+  layoutEarningsMarkers();
   drawings.forEach(d=>{ try{ layoutOne(d); }catch(e){ setFoot('描画エラー('+d.type+'): '+e.message); } });
   if(creating){ try{ layoutOne(creating); }catch(e){ setFoot('描画エラー: '+e.message); } }
   layoutPending();
@@ -3828,7 +4384,7 @@ function viewKey(){
   return (r ? r.from+','+r.to : '-')+','+w+','+h+','+py+','+ph;
 }
 (function syncLoop(){
-  if(drawings.length || creating || pendingPoint || (indShapes && indShapes.length)){
+  if(drawings.length || creating || pendingPoint || earningsNodes.length || (indShapes && indShapes.length)){
     if(relayoutFrames>0){
       relayoutFrames--;
       lastSyncKey=viewKey();
@@ -4156,18 +4712,70 @@ $('tfButtons').addEventListener('click',e=>{
 });
 
 /* ⚙ APIキー入力（端末に保存。コードには書かれない） */
-$('gear').addEventListener('click',()=>{
+function editTwelveKey(){
   const cur=store.get('td-key','');
   const ac=apiCount();
   askText('Twelve DataのAPIキーを入力（空にすると削除）\ntwelvedata.com で無料登録すると取得できます'
     +'\n\n本日のAPI使用: 約'+ac.n+'回 / '+API_DAY_LIMIT+'回（端末側で数えた目安）'
     +'\nアプリの版数: '+APP_VERSION, cur, k=>{
     store.set('td-key', (k||'').trim());
+    stockRsResults.clear();
     for(const key in realCache) delete realCache[key]; // 入れ替えたのでキャッシュ破棄
     try{ localStorage.removeItem(DISK_KEY); }catch(e){}  // 端末の保存も消す
     diskMem=null;
     render(); render2();
   });
+}
+function editAlpacaKey(){
+  askText('AlpacaのAPI Key ID（空にするとAlpacaを解除）',store.get('alpaca-id',''),id=>{
+    id=(id||'').trim();
+    if(!id){ store.set('alpaca-id',''); store.set('alpaca-secret',''); resetPriceSource(); return; }
+    askText('AlpacaのSecret Key（この端末だけに保存）',store.get('alpaca-secret',''),secret=>{
+      store.set('alpaca-id',id); store.set('alpaca-secret',(secret||'').trim()); resetPriceSource();
+    });
+  });
+}
+function resetPriceSource(){
+  stockRsResults.clear();
+  for(const key in realCache) delete realCache[key];
+  render(); render2();
+}
+function editEarningsKey(){
+  askText('Alpha Vantageの無料APIキー（決算日用・空にすると削除）\nalphavantage.co/support/',store.get('av-key',''),k=>{
+    const next=(k||'').trim();
+    if(next!==store.get('av-key','')){
+      store.set('av-key',next);
+      earningsFailures.clear();
+      earningsPending.clear();
+      revenuePending.clear();
+      // 別のキーのキャッシュを流用しない。過去のマークも表示し直す。
+      for(let i=localStorage.length-1;i>=0;i--){
+        const name=localStorage.key(i);
+        if(name && (name.startsWith('mychart-earn-')||name.startsWith('mychart-fund-revenue-'))) localStorage.removeItem(name);
+      }
+    }
+    showEarnings(current.ticker,'決算日: キー未設定');
+    refreshEarnings(current.ticker);
+  });
+}
+$('gear').addEventListener('click',()=>{
+  askChoice('設定するAPIキーを選んでください','株価','業績履歴（Alpha Vantage）',
+    ans=>ans==='A'
+      ? askChoice('株価データの取得元','Alpaca SIP（15分以上遅延）','Twelve Data',
+          choice=>choice==='A'?editAlpacaKey():editTwelveKey())
+      : editEarningsKey());
+});
+$('earningsChip').addEventListener('click',()=>{
+  $('fundBack').classList.add('open');
+  renderFundPanel(); refreshEarnings(current.ticker);
+  loadRevenue(current.ticker); loadStockRs(current.ticker);
+});
+$('fundClose').addEventListener('click',()=>$('fundBack').classList.remove('open'));
+$('fundBack').addEventListener('click',e=>{if(e.target===$('fundBack')) $('fundBack').classList.remove('open');});
+$('fundRefresh').addEventListener('click',()=>{
+  loadEarningsFeed(true);
+  refreshEarnings(current.ticker,true); loadRevenue(current.ticker,true);
+  stockRsResults.delete(current.ticker); loadStockRs(current.ticker); renderFundPanel();
 });
 
 new ResizeObserver(()=>{ const el=$('chart'); chart.resize(el.clientWidth,el.clientHeight);
@@ -4218,13 +4826,13 @@ async function render2(){
   // 以前は失敗を黙って握りつぶしてサンプルに差し替えていたため、
   // 2画面目に架空の価格が本物の顔で表示されていた
   let d=realCache[cacheKey], isReal=!!d, failMsg='';
-  if(!d && store.get('td-key','')){
+  if(!d && (priceProvider()==='alpaca' || store.get('td-key',''))){
     try{ d=await loadData(t2, current.step); isReal=true; }
     catch(e){ failMsg = (e && e.kind==='api') ? ('APIエラー: '+(e.message||'')) : '取得できず'; }
     if(my!==render2Token) return;            // 古い応答は捨てる
   }
   if(isReal && d) priceRemember(t2, d.candles);
-  if(!d){ d=sampleDataset(t2, current.step); isReal=false; }
+  if(!d){ d={candles:[],vols:[]}; isReal=false; }
   if(d.candles.length) applyPricePrecision(candle2, d.candles[d.candles.length-1].close);
   candle2.setData(d.candles); volume2.setData(d.vols);
   chart2.applyOptions({ timeScale:{ timeVisible: current.step==='65m', secondsVisible:false } });
@@ -4234,7 +4842,7 @@ async function render2(){
   const last=d.candles[d.candles.length-1], prev=d.candles[d.candles.length-2];
   if(!isReal){
     // 架空の数字は出さない（メイン画面の「サンプル」バッジと同じ考え方）
-    $('c2price').innerHTML='<span class="err">サンプル'+(failMsg?'／'+escHtml(failMsg):'')+'</span>';
+    $('c2price').textContent='未取得'+(failMsg?'／'+failMsg:'');
   } else if(last && prev && prev.close){
     const chg=(last.close-prev.close)/prev.close*100;
     $('c2price').textContent=fmtPrice(last.close)+' ('+(chg>=0?'+':'')+chg.toFixed(2)+'%)';
@@ -4424,18 +5032,25 @@ if(navigator.storage && navigator.storage.persist){
 
 // アプリが使っている保存キー一覧（バックアップの対象）
 const BK_KEYS=['mychart-lists','mychart-active-list','mychart-favs','mychart-last',
-  'mychart-drawings','custom-inds','td-key','mychart-layout','mychart-c2',
+  'mychart-drawings','custom-inds','td-key','av-key','mychart-layout','mychart-c2',
   'mychart-max','mychart-chips-collapsed','user-symbols','mychart-backup-at','mychart-prices',
   'mychart-russell-reviewed','mychart-russell-scan-date',
   'mychart-ibd-reviewed','mychart-ibd-scan-date',
   'mychart-sector-overrides',
   'mychart-logscale','mychart-tools-open','mychart-api-count','mychart-magnet','mychart-api-times','mychart-bar-position','mychart-vp-view','mychart-bar-tools','mychart-pane-view'];   // 目盛り(対数/普通)。以前ここに書き漏れていて復元されなかった
+function isFundBackupKey(k){return /^mychart-fund-(snapshot|guidance)-[A-Z0-9.\-]{1,15}-\d{4}-\d{2}-\d{2}$/.test(k);}
+function backupKeys(){
+  const keys=[...BK_KEYS];
+  for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(isFundBackupKey(k)) keys.push(k);}
+  return keys;
+}
+function importedBackupKeys(data){return Object.keys(data).filter(k=>BK_KEYS.includes(k)||isFundBackupKey(k));}
 
 // 書き出し：全設定を1つのファイルにしてダウンロード（「ファイル」アプリに保存できる）
 function buildBackup(includeKey){
   const data={ _app:'mychart', _at:new Date().toISOString() };
-  BK_KEYS.forEach(k=>{
-    if(k==='td-key' && !includeKey) return;      // APIキーを含めない選択もできる
+  backupKeys().forEach(k=>{
+    if((k==='td-key'||k==='av-key') && !includeKey) return;      // APIキーを含めない選択もできる
     const v=localStorage.getItem(k); if(v!=null) data[k]=v;
   });
   return JSON.stringify(data);
@@ -4515,7 +5130,7 @@ const UNDO_KEY='mychart-undo';
 function saveUndo(){
   try{
     const d={_app:'mychart', _at:new Date().toISOString()};
-    BK_KEYS.forEach(k=>{ const v=localStorage.getItem(k); if(v!=null) d[k]=v; });
+    backupKeys().forEach(k=>{ const v=localStorage.getItem(k); if(v!=null) d[k]=v; });
     localStorage.setItem(UNDO_KEY, JSON.stringify(d));
     return true;
   }catch(e){ return false; }   // 容量不足でも復元自体は続行する
@@ -4525,7 +5140,7 @@ function applyBackupText(text){
     const data=JSON.parse(text);
     if(!data || data._app!=='mychart') throw new Error('このアプリのバックアップではないようです');
     // 中身が空同然のファイルは、事故で全部消したのと同じになるので止める
-    const found=BK_KEYS.filter(k=>data[k]!=null);
+    const found=importedBackupKeys(data).filter(k=>typeof data[k]==='string');
     if(found.length===0) throw new Error('中身が空のようです（復元を中止しました）');
     saveUndo();                                   // ← 今の状態を退避
     found.forEach(k=>localStorage.setItem(k, data[k]));
@@ -4539,7 +5154,7 @@ function undoRestore(){
     const raw=localStorage.getItem(UNDO_KEY);
     if(!raw){ setFoot('戻せる状態がありません'); return; }
     const d=JSON.parse(raw);
-    const found=BK_KEYS.filter(k=>d[k]!=null);
+    const found=importedBackupKeys(d).filter(k=>typeof d[k]==='string');
     if(!found.length){ setFoot('戻せる状態がありません'); return; }
     saveUndo();                                   // 「戻す」の取り消しもできるように
     found.forEach(k=>localStorage.setItem(k, d[k]));
