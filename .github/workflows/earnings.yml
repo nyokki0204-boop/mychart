@@ -16,7 +16,12 @@ jobs:
       - name: Fetch earnings
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-        run: node scripts/update-earnings.mjs
+        run: |
+          if [ -z "$FINNHUB_API_KEY" ]; then
+            echo 'FINNHUB_API_KEY is not configured; skipping update.'
+            exit 0
+          fi
+          node scripts/update-earnings.mjs
       - name: Commit updated data
         run: |
           git add data/earnings.json
