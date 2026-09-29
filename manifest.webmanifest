@@ -1,0 +1,25 @@
+{
+  "name": "MyChart",
+  "short_name": "MyChart",
+  "description": "米国株のチャートとセクター情報",
+  "lang": "ja",
+  "start_url": "./mychart.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0e1117",
+  "theme_color": "#0e1117",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
