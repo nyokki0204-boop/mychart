@@ -281,7 +281,8 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
   padding:5px 8px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);
   color:var(--text);font-size:11px;font-weight:600;text-align:left;cursor:pointer}
 #earningsChip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#earningsChip .earningsSummary{color:#a8b3c5;font-size:10px;margin-top:2px}
+#earningsChip .earningsEps{color:var(--text);font-size:10px;margin-top:2px}
+#earningsChip .earningsSales{color:#a8b3c5;font-size:10px;margin-top:2px}
 #fundBack .modal{width:94%;max-width:480px;max-height:88dvh}
 #fundBody{overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch;font-size:12px;line-height:1.5}
 .fundCard{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:10px;background:#111722}
@@ -528,7 +529,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v63 (決算履歴を見やすく)';
+const APP_VERSION='v64 (決算の予想比も表示)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2149,8 +2150,14 @@ function showEarnings(ticker, message){
   const first=document.createElement('span'); first.textContent=label;
   chip.replaceChildren(first);
   if(summary){
-    const second=document.createElement('span'); second.className='earningsSummary'; second.textContent=summary.text;
-    chip.appendChild(second);
+    if(summary.eps){
+      const second=document.createElement('span'); second.className='earningsEps'; second.textContent=summary.eps;
+      chip.appendChild(second);
+    }
+    if(summary.sales){
+      const third=document.createElement('span'); third.className='earningsSales'; third.textContent=summary.sales;
+      chip.appendChild(third);
+    }
   }
   chip.title=[date ? ticker+' 決算予定 '+date+'（変更の可能性あり・'+(feedDate?'Finnhub':'Alpha Vantage')+'）' : label,
     summary?.title].filter(Boolean).join(' ｜ ');
@@ -2165,13 +2172,29 @@ function earningsChipSummary(ticker){
   const revIndex=revenue.findIndex(r=>r.period===latest.period);
   const epsYoY=fundYoY(rows,0,'eps');
   const salesYoY=revIndex<0?'—':fundYoY(revenue,revIndex,'revenue');
-  const parts=[];
-  if(epsYoY!=='—') parts.push('EPS '+epsYoY);
-  if(salesYoY!=='—') parts.push('売上 '+salesYoY);
-  let basis='前年比';
-  if(!parts.length && latest.eps!=null){parts.push('EPS '+fundNumber(latest.eps));basis='直近実績';}
-  if(!parts.length) return null;
-  return {text:basis+' '+parts.join('・'),title:'直近 '+latest.period+'期：'+basis+' '+parts.join('／')};
+  const snapshot=store.get(fundSnapshotKey(ticker,latest.period),null);
+  const before=!!(snapshot && snapshot.at && latest.date && new Date(snapshot.at).toISOString().slice(0,10)<latest.date);
+  const epsEstimate=before && snapshot.eps!=null?snapshot.eps:latest.estimate;
+  const gap=(actual,expected)=>{
+    if(actual==null||expected==null||!Number.isFinite(+actual)||!Number.isFinite(+expected)) return null;
+    if(+expected===0) return actual>0?'超過':actual<0?'未達':'一致';
+    const percent=(actual-expected)/Math.abs(expected)*100;
+    return (percent>0?'+':'')+percent.toFixed(1)+'%';
+  };
+  const epsParts=[],salesParts=[];
+  const epsGap=gap(latest.eps,epsEstimate);
+  if(epsGap) epsParts.push('予想比 '+epsGap);
+  if(epsYoY!=='—') epsParts.push('前年比 '+epsYoY);
+  if(!epsParts.length && latest.eps!=null) epsParts.push('実績 '+fundNumber(latest.eps));
+  const rev=revIndex<0?null:revenue[revIndex];
+  if(before && rev?.currency==='USD' && snapshot.revenue!=null){
+    const salesGap=gap(rev.revenue,snapshot.revenue*1e9);
+    if(salesGap) salesParts.push('予想比 '+salesGap);
+  }
+  if(salesYoY!=='—') salesParts.push('前年比 '+salesYoY);
+  if(!epsParts.length && !salesParts.length) return null;
+  const eps=epsParts.length?'EPS '+epsParts.join('・'):'',sales=salesParts.length?'売上 '+salesParts.join('・'):'';
+  return {eps,sales,title:'直近 '+latest.period+'期：'+[eps,sales].filter(Boolean).join(' ｜ ')};
 }
 async function fetchEarnings(ticker, part, key){
   const fn=part==='calendar'?'EARNINGS_CALENDAR':'EARNINGS';
