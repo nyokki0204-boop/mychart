@@ -30,6 +30,26 @@ test('Alpaca daily bars use SIP, split adjustments and New York dates',async()=>
   assert.equal(calls[0].options.headers['APCA-API-KEY-ID'],'test');
 });
 
+test('Alpaca intraday bars exclude premarket and keep New York 65-minute boundaries',async()=>{
+  const bars=[
+    ['2026-09-25T13:25:00Z',9],['2026-09-25T13:30:00Z',10],
+    ['2026-09-25T14:30:00Z',11],['2026-09-25T14:35:00Z',12]
+  ].map(([t,c])=>({t,o:c,h:c,l:c,c,v:100}));
+  const ctx=vm.createContext({
+    store:{get:k=>({'alpaca-id':'test','alpaca-secret':'test'}[k])},
+    fetch:async()=>({ok:true,json:async()=>({bars,next_page_token:null})}),
+    URLSearchParams,Date,Intl,Map,Set
+  });
+  vm.runInContext(section('function bundle(bucket, time){','/* 日足 → 週足'),ctx);
+  vm.runInContext(section('function isSaneRow(v){','/* 1日のAPI回数を数える'),ctx);
+  vm.runInContext(section('function priceProvider(){','/* =========================================================\n   ③ サンプルデータ'),ctx);
+  const result=await ctx.fetchAlpaca('PD','65m');
+  assert.equal(result.candles.length,2);
+  assert.equal(result.candles[0].time,Date.parse('2026-09-25T13:30:00Z')/1000);
+  assert.equal(result.candles[0].close,11);
+  assert.equal(result.candles[1].time,Date.parse('2026-09-25T14:35:00Z')/1000);
+});
+
 test('Finnhub snapshot is retained when estimates change after reporting',async()=>{
   const os=require('node:os'), {spawnSync}=require('node:child_process');
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'earnings-test-'));
