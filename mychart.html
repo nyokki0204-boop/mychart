@@ -526,7 +526,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v60 (SIP価格・決算の定期更新)';
+const APP_VERSION='v61 (株価キーの安全対策)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -549,6 +549,8 @@ const store = {
     return false;
   }
 };
+// 旧版がブラウザに保存した取引にも使えるAlpacaキーを、このアプリの保存領域から削除する。
+try { localStorage.removeItem('alpaca-id'); localStorage.removeItem('alpaca-secret'); } catch(e){}
 
 /* 画面に文字を出す時、記号がHTMLとして解釈されないようにする。
    インジ名やエラー文に " や < が入ると、設定画面や下のバーが崩れるため */
@@ -1160,68 +1162,19 @@ async function fetchTwelve(symbol, step){
   return { candles, volumes };
 }
 
-function priceProvider(){ return store.get('alpaca-id','') && store.get('alpaca-secret','') ? 'alpaca' : 'twelve'; }
+function priceProvider(){ return 'twelve'; }
 function priceTicker(ticker){ return ticker+'#'+priceProvider(); }
 const priceRequests=new Map();
 async function fetchReal(symbol, step){
   const id=symbol+'@'+step+'@'+priceProvider();
   if(priceRequests.has(id)) return priceRequests.get(id);
-  const task=(priceProvider()==='alpaca'?fetchAlpaca(symbol,step):fetchTwelve(symbol,step))
+  const task=fetchTwelve(symbol,step)
     .finally(()=>priceRequests.delete(id));
   priceRequests.set(id,task);
   return task;
 }
-function nyStamp(date){
-  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23',weekday:'short'}).formatToParts(date);
-  return Object.fromEntries(parts.map(p=>[p.type,p.value]));
-}
-function nyDay(p){ return p.year+'-'+p.month+'-'+p.day; }
 function priceFresh(kind, at){
-  if(priceProvider()!=='alpaca') return Date.now()-at <= (kind==='65m'?TTL_INTRA:TTL_DAILY);
-  const now=nyStamp(new Date()), then=nyStamp(new Date(at));
-  const minute=+now.hour*60+(+now.minute);
-  const open=!['Sat','Sun'].includes(now.weekday) && minute>=570 && minute<980;
-  if(open) return Date.now()-at < 5*60000;
-  if(kind==='65m' && !['Sat','Sun'].includes(now.weekday) && minute>=980 &&
-     nyDay(then)===nyDay(now) && (+then.hour*60+ +then.minute)<980) return false;
-  // NY深夜の確定版を一度取得し、週末は土曜の確定取得を使い回す。
-  const day=p=>{
-    const d=new Date(nyDay(p)+'T12:00:00Z');
-    if((+p.hour*60+ +p.minute)<30) d.setUTCDate(d.getUTCDate()-1);
-    if(d.getUTCDay()===0) d.setUTCDate(d.getUTCDate()-1);
-    return d.toISOString().slice(0,10);
-  };
-  return day(then)===day(now);
-}
-async function fetchAlpaca(symbol, step){
-  if(!/^[A-Z0-9][A-Z0-9.\-]{0,14}$/.test(symbol)) throw {kind:'api',message:'Alpacaで扱えない銘柄です'};
-  const key=store.get('alpaca-id',''), secret=store.get('alpaca-secret','');
-  if(!key || !secret) throw {kind:'nokey'};
-  const end=new Date(Date.now()-16*60000).toISOString();
-  const start=step==='65m' ? new Date(Date.now()-75*86400000).toISOString() : '2016-01-01';
-  const params=new URLSearchParams({timeframe:step==='65m'?'5Min':'1Day',start,end,
-    adjustment:'split',feed:'sip',limit:'10000'});
-  const bars=[]; let page='';
-  do{
-    if(page) params.set('page_token',page);
-    const resp=await fetch('https://data.alpaca.markets/v2/stocks/'+encodeURIComponent(symbol)+'/bars?'+params,
-      {headers:{'APCA-API-KEY-ID':key,'APCA-API-SECRET-KEY':secret}});
-    if(!resp.ok) throw {kind:'api',message:resp.status===403?'SIP履歴の権限または15分遅延の条件を確認してください':'Alpaca HTTP '+resp.status};
-    const json=await resp.json();
-    if(!Array.isArray(json.bars)) throw {kind:'api',message:'Alpacaの価格データを確認できません'};
-    bars.push(...json.bars); page=json.next_page_token||'';
-    if(bars.length>40000) throw {kind:'api',message:'価格履歴が多すぎます'};
-  }while(page);
-  const rows=bars.map(b=>{
-    const date=new Date(b.t), p=nyStamp(date), minute=+p.hour*60+ +p.minute;
-    if(step==='65m' && (minute<570 || minute>=960 || ['Sat','Sun'].includes(p.weekday))) return null;
-    return {datetime:nyDay(p)+(step==='65m'?' '+p.hour+':'+p.minute:''),
-      epoch:Math.floor(date.getTime()/1000),open:b.o,high:b.h,low:b.l,close:b.c,volume:b.v};
-  }).filter(isSaneRow);
-  if(!rows.length) throw {kind:'api',message:'有効なSIP価格がありません'};
-  if(step==='65m') return to65(rows);
-  return {candles:rows.map(r=>({time:r.datetime,open:r.open,high:r.high,low:r.low,close:r.close})),
-    volumes:rows.map(r=>({time:r.datetime,value:r.volume||0}))};
+  return Date.now()-at <= (kind==='65m'?TTL_INTRA:TTL_DAILY);
 }
 
 /* =========================================================
@@ -2452,7 +2405,7 @@ function renderFundPanel(){
   const rs=stockRsResults.get(ticker);
   const rsCard=document.createElement('section');rsCard.className='fundCard';body.appendChild(rsCard);
   fundText(rsCard,'h3','株価の相対成績（対SPY）');
-  if(priceProvider()!=='alpaca' && !store.get('td-key','')) fundText(rsCard,'p','株価APIキー未設定のため計算できません。','fundMuted');
+  if(!store.get('td-key','')) fundText(rsCard,'p','株価APIキー未設定のため計算できません。','fundMuted');
   else if(!rs) fundText(rsCard,'p','価格を取得中…','fundMuted');
   else if(rs.error) fundText(rsCard,'p','比較できません：'+rs.error,'fundMuted');
   else for(const weeks of [13,26,52]){
@@ -2516,13 +2469,12 @@ function draw(d){
 function setMode(mode, msg){
   const b=$('badge');
   if(mode==='real'){
-    const alpaca=priceProvider()==='alpaca';
-    b.textContent=alpaca?'SIP 15分遅延':'Twelve Data'; b.className='badge real';
+    b.textContent='Twelve Data'; b.className='badge real';
     const last=currentCandles.at(-1)?.time;
     const stamp=last ? (typeof last==='number'
       ? new Date(last*1000).toLocaleString('ja-JP',{timeZone:'America/New_York'})+' NY'
       : String(last)) : '時刻不明';
-    $('foot').textContent=(alpaca?'Alpaca SIP・15分以上遅延':'Twelve Data')+' ｜ 最終足 '+stamp;
+    $('foot').textContent='Twelve Data ｜ 最終足 '+stamp;
   }else{
     b.textContent='未取得'; b.className='badge sample';
     $('foot').textContent=msg||'⚙から価格APIキーを設定してください';
@@ -2567,7 +2519,7 @@ async function render(){
     return;
   }
 
-  if(priceProvider()==='alpaca' || store.get('td-key','')){
+  if(store.get('td-key','')){
     $('foot').textContent='読み込み中…';
     // 待っている間、前の銘柄のチャートを新しい銘柄だと誤読しないよう覆う
     setLoading(true, ticker+' を読み込み中…\n（表示中のチャートはまだ前の銘柄です）');
@@ -3017,7 +2969,7 @@ function runIndicatorCode(ind){
     const st=step||current.step, key=ticker+'@'+st;
     const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close, volume:0}));
     if(realCache[key]) return alignToChart(toArr(realCache[key]));
-    if(!collectingInputs && (priceProvider()==='alpaca'||store.get('td-key','')) && !htfFetching[key] && canFetch(key)){
+    if(!collectingInputs && store.get('td-key','') && !htfFetching[key] && canFetch(key)){
       htfFetching[key]=true;
       loadData(ticker, st).then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
         .catch(e=>{ htfFetching[key]=false; htfFailed[key]=Date.now(); trimMap(htfFailed,200);
@@ -3098,7 +3050,7 @@ function htf(step){
   const key=current.ticker+'@'+step;
   const toArr=d=>d.candles.map(c=>({time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}));
   if(realCache[key]) return toArr(realCache[key]);
-  if(!collectingInputs && (priceProvider()==='alpaca'||store.get('td-key','')) && !htfFetching[key] && canFetch(key)){
+  if(!collectingInputs && store.get('td-key','') && !htfFetching[key] && canFetch(key)){
     htfFetching[key]=true;
     loadData(current.ticker, step)
       .then(()=>{ htfFetching[key]=false; indDataNote=''; scheduleApplyIndicators(); })
@@ -4726,20 +4678,6 @@ function editTwelveKey(){
     render(); render2();
   });
 }
-function editAlpacaKey(){
-  askText('AlpacaのAPI Key ID（空にするとAlpacaを解除）',store.get('alpaca-id',''),id=>{
-    id=(id||'').trim();
-    if(!id){ store.set('alpaca-id',''); store.set('alpaca-secret',''); resetPriceSource(); return; }
-    askText('AlpacaのSecret Key（この端末だけに保存）',store.get('alpaca-secret',''),secret=>{
-      store.set('alpaca-id',id); store.set('alpaca-secret',(secret||'').trim()); resetPriceSource();
-    });
-  });
-}
-function resetPriceSource(){
-  stockRsResults.clear();
-  for(const key in realCache) delete realCache[key];
-  render(); render2();
-}
 function editEarningsKey(){
   askText('Alpha Vantageの無料APIキー（決算日用・空にすると削除）\nalphavantage.co/support/',store.get('av-key',''),k=>{
     const next=(k||'').trim();
@@ -4760,10 +4698,7 @@ function editEarningsKey(){
 }
 $('gear').addEventListener('click',()=>{
   askChoice('設定するAPIキーを選んでください','株価','業績履歴（Alpha Vantage）',
-    ans=>ans==='A'
-      ? askChoice('株価データの取得元','Alpaca SIP（15分以上遅延）','Twelve Data',
-          choice=>choice==='A'?editAlpacaKey():editTwelveKey())
-      : editEarningsKey());
+    ans=>ans==='A'?editTwelveKey():editEarningsKey());
 });
 $('earningsChip').addEventListener('click',()=>{
   $('fundBack').classList.add('open');
@@ -4826,7 +4761,7 @@ async function render2(){
   // 以前は失敗を黙って握りつぶしてサンプルに差し替えていたため、
   // 2画面目に架空の価格が本物の顔で表示されていた
   let d=realCache[cacheKey], isReal=!!d, failMsg='';
-  if(!d && (priceProvider()==='alpaca' || store.get('td-key',''))){
+  if(!d && store.get('td-key','')){
     try{ d=await loadData(t2, current.step); isReal=true; }
     catch(e){ failMsg = (e && e.kind==='api') ? ('APIエラー: '+(e.message||'')) : '取得できず'; }
     if(my!==render2Token) return;            // 古い応答は捨てる
