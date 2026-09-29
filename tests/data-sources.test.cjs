@@ -9,45 +9,26 @@ function section(a,b){
   assert.ok(start>=0&&end>start); return html.slice(start,end);
 }
 
-test('Alpaca daily bars use SIP, split adjustments and New York dates',async()=>{
+test('previously saved Alpaca credentials are removed and never used for prices',async()=>{
+  const saved=new Map([['alpaca-id','old-id'],['alpaca-secret','old-secret'],['td-key','twelve-key']]);
+  const localStorage={removeItem:k=>saved.delete(k)};
+  vm.runInNewContext(section('const store = {','/* 画面に文字を出す時'),{
+    localStorage,document:{},JSON
+  });
+  assert.equal(saved.has('alpaca-id'),false);
+  assert.equal(saved.has('alpaca-secret'),false);
+  assert.equal(saved.get('td-key'),'twelve-key');
+  assert.doesNotMatch(html,/data\.alpaca\.markets|APCA-API-SECRET-KEY|function editAlpacaKey/);
   const calls=[];
   const ctx=vm.createContext({
-    store:{get:k=>({'alpaca-id':'test','alpaca-secret':'test'}[k])},
-    fetch:async(url,options)=>{
-      calls.push({url:String(url),options});
-      return {ok:true,json:async()=>({bars:[
-        {t:'2026-09-25T04:00:00Z',o:14.82,h:15,l:14,c:14.9,v:1668852}
-      ],next_page_token:null})};
-    },URLSearchParams,Date,Intl,Map,Set
+    fetchTwelve:async(symbol,step)=>{ calls.push([symbol,step]); return {candles:[],volumes:[]}; },
+    Date,Map
   });
-  vm.runInContext(section('function isSaneRow(v){','/* 1日のAPI回数を数える'),ctx);
   vm.runInContext(section('function priceProvider(){','/* =========================================================\n   ③ サンプルデータ'),ctx);
-  const data=await ctx.fetchAlpaca('PD','1d');
-  assert.equal(data.candles[0].time,'2026-09-25');
-  assert.equal(data.volumes[0].value,1668852);
-  assert.match(calls[0].url,/feed=sip/);
-  assert.match(calls[0].url,/adjustment=split/);
-  assert.equal(calls[0].options.headers['APCA-API-KEY-ID'],'test');
-});
-
-test('Alpaca intraday bars exclude premarket and keep New York 65-minute boundaries',async()=>{
-  const bars=[
-    ['2026-09-25T13:25:00Z',9],['2026-09-25T13:30:00Z',10],
-    ['2026-09-25T14:30:00Z',11],['2026-09-25T14:35:00Z',12]
-  ].map(([t,c])=>({t,o:c,h:c,l:c,c,v:100}));
-  const ctx=vm.createContext({
-    store:{get:k=>({'alpaca-id':'test','alpaca-secret':'test'}[k])},
-    fetch:async()=>({ok:true,json:async()=>({bars,next_page_token:null})}),
-    URLSearchParams,Date,Intl,Map,Set
-  });
-  vm.runInContext(section('function bundle(bucket, time){','/* 日足 → 週足'),ctx);
-  vm.runInContext(section('function isSaneRow(v){','/* 1日のAPI回数を数える'),ctx);
-  vm.runInContext(section('function priceProvider(){','/* =========================================================\n   ③ サンプルデータ'),ctx);
-  const result=await ctx.fetchAlpaca('PD','65m');
-  assert.equal(result.candles.length,2);
-  assert.equal(result.candles[0].time,Date.parse('2026-09-25T13:30:00Z')/1000);
-  assert.equal(result.candles[0].close,11);
-  assert.equal(result.candles[1].time,Date.parse('2026-09-25T14:35:00Z')/1000);
+  assert.equal(ctx.priceProvider(),'twelve');
+  await ctx.fetchReal('PD','1d');
+  assert.equal(calls.length,1);
+  assert.deepEqual(calls[0],['PD','1d']);
 });
 
 test('Finnhub snapshot is retained when estimates change after reporting',async()=>{
