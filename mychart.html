@@ -306,6 +306,10 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 #quickFundPanel .quickFundMetric{display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 6px}
 #quickFundPanel .quickFundMetric b{font-variant-numeric:tabular-nums}
 #quickFundPanel .quickFundResult{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:3px 0 8px}
+#quickFundPanel .quickFundPace{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:0 0 8px;font-size:11px}
+#quickFundPanel .quickFundPace b{font-variant-numeric:tabular-nums}
+#quickFundPanel .quickFundPace .slowing{color:#ffc36a}
+#quickFundPanel .quickFundPace .speeding{color:#bfd7ff}
 #quickFundPanel .quickFundGood{color:#42d6bb;font-weight:700}
 #quickFundPanel .quickFundBad{color:#ff737a;font-weight:700}
 #quickFundPanel .quickFundUnknown{color:#a8b3c5}
@@ -570,7 +574,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v68 (予想比はファンダ内に集約)';
+const APP_VERSION='v69 (前期比と加速・減速)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2352,7 +2356,31 @@ function quickFundSurprise(actual,estimate){
   const percent=estimate===0?'':(' '+(diff>0?'+':'')+(diff/Math.abs(estimate)*100).toFixed(1)+'%');
   return {text:verdict+percent,cls:diff>0?'quickFundGood':diff<0?'quickFundBad':'quickFundUnknown'};
 }
-function quickFundMetric(parent,label,value,forecast,result,yoy='—',negative=false){
+function quickFundQuarterGrowth(actual,previous){
+  if(!Number.isFinite(actual)||!Number.isFinite(previous)) return null;
+  if(previous<0) return {text:actual>0?'黒字転換':actual===0?'赤字解消':actual>previous?'赤字縮小':actual<previous?'赤字拡大':'赤字横ばい',rate:null};
+  if(previous===0) return {text:actual>0?'黒字化':actual<0?'赤字転落':'前期が0のため比較不可',rate:null};
+  if(actual<0) return {text:'赤字転落',rate:null};
+  const rate=(actual/previous-1)*100;
+  return {text:'前期比 '+(rate>0?'+':'')+rate.toFixed(1)+'%',rate};
+}
+function quickFundQuarterTrend(rows,index,field){
+  const current=rows[index],previous=rows[index+1];
+  if(!current||!previous) return null;
+  if(field==='revenue' && (!current.currency || current.currency!==previous.currency)) return null;
+  const gap=(Date.parse(current.period+'T00:00:00Z')-Date.parse(previous.period+'T00:00:00Z'))/86400000;
+  if(!Number.isFinite(gap)||gap<60||gap>120) return null;
+  const growth=quickFundQuarterGrowth(current[field],previous[field]);
+  if(!growth) return null;
+  const older=rows[index+2];
+  const olderGap=older?(Date.parse(previous.period+'T00:00:00Z')-Date.parse(older.period+'T00:00:00Z'))/86400000:null;
+  const earlier=olderGap>=60&&olderGap<=120&&
+    (field!=='revenue'||previous.currency===older.currency)?quickFundQuarterGrowth(previous[field],older[field]):null;
+  const diff=earlier?.rate!=null&&growth.rate!=null?growth.rate-earlier.rate:null;
+  const momentum=diff==null?'':diff>0.05?'加速':diff< -0.05?'減速':'横ばい';
+  return {text:growth.text,rate:growth.rate,momentum,previousText:earlier?.text||''};
+}
+function quickFundMetric(parent,label,value,forecast,result,yoy='—',qoq=null,negative=false){
   const row=document.createElement('p');row.className='quickFundMetric';parent.appendChild(row);
   fundText(row,'span',label);
   fundText(row,'b',value,negative?'quickFundBad':value==='未取得'||value==='—'?'quickFundUnknown':'');
@@ -2360,6 +2388,12 @@ function quickFundMetric(parent,label,value,forecast,result,yoy='—',negative=f
   const status=document.createElement('p');status.className='quickFundResult';parent.appendChild(status);
   fundText(status,'span',result.text,'quickFundCompare '+result.cls);
   if(yoy!=='—') fundText(status,'span','前年比 '+yoy,'quickFundMuted');
+  if(qoq){
+    const pace=document.createElement('p');pace.className='quickFundPace';parent.appendChild(pace);
+    fundText(pace,'b',qoq.text,qoq.rate==null?'quickFundUnknown':qoq.rate>0?'quickFundGood':qoq.rate<0?'quickFundBad':'');
+    if(qoq.momentum) fundText(pace,'span',qoq.momentum+'（前回 '+qoq.previousText.replace(/^前期比 /,'')+'）',
+      qoq.momentum==='減速'?'slowing':'speeding');
+  }
 }
 function renderQuickFund(){
   const ticker=current.ticker, body=$('quickFundBody'); body.replaceChildren();
@@ -2385,15 +2419,17 @@ function renderQuickFund(){
     const before=Number.isFinite(snapshot?.at) && !!r.date && new Date(snapshot.at).toISOString().slice(0,10)<r.date;
     const epsEstimate=before && Number.isFinite(snapshot.eps)?snapshot.eps:r.estimate;
     const epsYoY=fundYoY(rows,i,'eps');
-    quickFundMetric(block,'EPS',fundNumber(r.eps),fundNumber(epsEstimate),quickFundSurprise(r.eps,epsEstimate),epsYoY,r.eps<0);
+    quickFundMetric(block,'EPS',fundNumber(r.eps),fundNumber(epsEstimate),quickFundSurprise(r.eps,epsEstimate),
+      epsYoY,i===0?quickFundQuarterTrend(rows,i,'eps'):null,r.eps<0);
     const revIndex=revenues.findIndex(x=>x.period===r.period),rev=revenues[revIndex];
     const yoy=rev?fundYoY(revenues,revIndex,'revenue'):'—';
     const salesEstimate=before && rev?.currency==='USD' && Number.isFinite(snapshot.revenue)?snapshot.revenue*1e9:null;
     quickFundMetric(block,'売上',rev?fundMoney(rev.revenue,rev.currency):'未取得',
-      fundMoney(salesEstimate,salesEstimate==null?'':'USD'),quickFundSurprise(rev?.revenue,salesEstimate),yoy);
+      fundMoney(salesEstimate,salesEstimate==null?'':'USD'),quickFundSurprise(rev?.revenue,salesEstimate),
+      yoy,i===0 && revIndex>=0?quickFundQuarterTrend(revenues,revIndex,'revenue'):null);
   });
   if(history) fundText(body,'p','実績：Alpha Vantage（取得 '+new Date(history.at).toLocaleDateString('ja-JP')+
-    '）。EPS予想は発表前の保存値を優先し、なければ履歴の予想。売上予想は発表前の保存値がある場合のみ。','quickFundMuted');
+    '）。EPS予想は発表前の保存値を優先し、なければ履歴の予想。売上予想は発表前の保存値がある場合のみ。前期比は季節性に注意。','quickFundMuted');
   fundText(body,'p','利益率・現金・負債・企業ガイダンス・割安度はこの画面では未取得。AIによる分析ではありません。','quickFundMuted');
 }
 function fundInput(form,label,name,value=''){
