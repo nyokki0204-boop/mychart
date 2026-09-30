@@ -43,3 +43,24 @@ test('EPS and revenue surprise is explicit and colored, including missing foreca
   assert.match(html, /\.quickFundCompare\.quickFundGood\{background:/);
   assert.match(html, /\.quickFundCompare\.quickFundBad\{background:/);
 });
+
+test('latest quarter shows quarter-over-quarter growth and its acceleration', () => {
+  const start = html.indexOf('function quickFundQuarterGrowth(actual,previous){');
+  const end = html.indexOf('\nfunction quickFundMetric(', start);
+  assert.ok(start > 0 && end > start);
+  const {growth,trend} = Function(html.slice(start,end)+
+    '\nreturn {growth:quickFundQuarterGrowth,trend:quickFundQuarterTrend}')();
+  const periods=['2026-06-30','2026-03-31','2025-12-31'];
+  const rows=[.11,.10,.095].map((eps,i)=>({period:periods[i],eps}));
+  const latest=trend(rows,0,'eps');
+  assert.equal(latest.text,'前期比 +10.0%');
+  assert.ok(Math.abs(latest.rate-10)<1e-8);
+  assert.equal(latest.momentum,'加速');
+  assert.equal(latest.previousText,'前期比 +5.3%');
+  rows[2].eps=.08;
+  assert.equal(trend(rows,0,'eps').momentum,'減速');
+  assert.deepEqual(growth(.11,-.09),{text:'黒字転換',rate:null});
+  assert.equal(trend([{period:'2026-06-30',eps:.11},{period:'2025-12-31',eps:.1}],0,'eps'),null);
+  assert.equal(trend([{period:periods[0],revenue:110,currency:'USD'},
+    {period:periods[1],revenue:100,currency:'EUR'}],0,'revenue'),null);
+});
