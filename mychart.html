@@ -284,12 +284,18 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 #sectorPanel .sector-actions{display:flex;gap:6px;margin-top:7px}#sectorPanel .sector-actions button{flex:1;min-height:40px;
   background:#233044;color:var(--text);border:1px solid #394356;border-radius:6px;font-size:12px}
 #sectorPanel .sector-actions button:first-child{background:var(--accent);border-color:var(--accent);color:#fff}
-#earningsChip{position:absolute;right:7px;bottom:72px;z-index:8;max-width:min(220px,calc(100% - 14px));min-height:30px;
+#fundQuickActions{position:absolute;right:7px;bottom:72px;z-index:8;display:flex;align-items:flex-end;gap:6px;max-width:calc(100% - 14px)}
+#earningsChip{position:relative;min-width:0;max-width:220px;min-height:30px;
   padding:5px 8px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);
   color:var(--text);font-size:11px;font-weight:600;text-align:left;cursor:pointer}
 #earningsChip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #earningsChip .earningsEps{color:var(--text);font-size:10px;margin-top:2px}
 #earningsChip .earningsSales{color:#a8b3c5;font-size:10px;margin-top:2px}
+#askGptFund{display:flex;flex:0 0 auto;align-items:center;justify-content:center;min-width:44px;min-height:34px;
+  padding:5px 7px;border:1px solid #4b6080;border-radius:7px;background:rgba(22,27,36,.94);
+  color:#d7e6ff;font-size:11px;font-weight:700;text-decoration:none}
+#askGptFund[hidden]{display:none}
+#askGptFund:focus-visible{outline:2px solid #81afff}
 #fundBack .modal{width:94%;max-width:480px;max-height:88dvh}
 #fundBody{overflow-y:auto;min-height:0;-webkit-overflow-scrolling:touch;font-size:12px;line-height:1.5}
 .fundCard{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:10px;background:#111722}
@@ -382,7 +388,10 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
           <div class="sector-actions"><button id="sectorSave" type="button">指定を保存</button><button id="sectorReset" type="button">自動判定に戻す</button></div>
         </section>
       </div>
-      <button id="earningsChip" type="button" title="決算と業績を確認">決算予定: 未確認</button>
+      <div id="fundQuickActions">
+        <a id="askGptFund" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer" title="表示中の銘柄のファンダメンタルズをChatGPTに質問" aria-label="ファンダメンタルズをChatGPTに質問">GPT ↗</a>
+        <button id="earningsChip" type="button" title="決算と業績を確認">決算予定: 未確認</button>
+      </div>
     <table id="indTable"></table>
     </div>
     <div id="c2pane">
@@ -536,7 +545,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v64 (決算の予想比も表示)';
+const APP_VERSION='v65 (銘柄のファンダメンタルズをChatGPTに質問)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2540,6 +2549,10 @@ function setLoading(on, msg){
    スワイプで素早く銘柄を変えた時、遅れて届いた古い応答で
    画面が上書きされる（銘柄名と中身がズレる）のを防ぐ */
 let renderToken=0;
+function chatGptFundamentalsUrl(ticker){
+  const prompt=`ティッカー ${ticker} のファンダメンタルズを日本語で簡潔に分析してください。まず会社名・上場市場を確認し、最新の決算（売上高・EPS・前年同期比・予想比）、利益率、現金・負債、会社のガイダンス、バリュエーション、主な成長要因とリスクを整理してください。ETFや指数なら企業決算として扱わず、構成・経費率など該当する項目に置き換えてください。最新の公開情報を調べ、各数値の対象期間・確認日・出典リンクを示し、確認できない項目は推測せず不明としてください。投資判断の断定は避けてください。`;
+  return 'https://chatgpt.com/?q='+encodeURIComponent(prompt);
+}
 async function render(){
   const my=++renderToken;                    // この呼び出しの番号札
   $('fundBack').classList.remove('open');
@@ -2547,6 +2560,13 @@ async function render(){
   const ticker=current.ticker, step=current.step;
   exprMode = looksLikeExpr(ticker);      // 桁数の切り替えに使う
   $('hdrTicker').textContent=ticker;
+  const askGpt=$('askGptFund');
+  askGpt.hidden=exprMode || !/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker);
+  if(!askGpt.hidden){
+    askGpt.href=chatGptFundamentalsUrl(ticker);
+    askGpt.setAttribute('aria-label',ticker+' のファンダメンタルズをChatGPTに質問');
+    askGpt.title=ticker+' のファンダメンタルズをChatGPTに質問（別タブ）';
+  }
   $('hdrFav').style.display=isFav(ticker)?'inline':'none';
   store.set('mychart-last', ticker);
   closeSectorPanel(); updateSectorContext();
