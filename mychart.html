@@ -289,14 +289,12 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
   padding:5px 8px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);
   color:var(--text);font-size:11px;font-weight:600;text-align:left;cursor:pointer}
 #earningsChip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#earningsChip .earningsEps{color:var(--text);font-size:10px;margin-top:2px}
-#earningsChip .earningsSales{color:#a8b3c5;font-size:10px;margin-top:2px}
 #quickFundBtn{display:flex;flex:0 0 auto;align-items:center;justify-content:center;min-width:54px;min-height:34px;
   padding:5px 7px;border:1px solid #4b6080;border-radius:7px;background:rgba(22,27,36,.94);
   color:#d7e6ff;font-size:11px;font-weight:700;cursor:pointer}
 #quickFundBtn[hidden]{display:none}
 #quickFundBtn:focus-visible{outline:2px solid #81afff}
-#quickFundPanel{position:absolute;right:7px;bottom:142px;z-index:12;width:min(320px,calc(100% - 14px));
+#quickFundPanel{position:absolute;right:7px;bottom:114px;z-index:12;width:min(320px,calc(100% - 14px));
   max-height:min(55dvh,390px);overflow-y:auto;touch-action:pan-y;
   padding:11px;background:#19212ef8;border:1px solid #4b6080;border-radius:9px;box-shadow:0 12px 30px #000a;
   color:var(--text);font-size:12px;line-height:1.45}
@@ -307,12 +305,14 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 #quickFundPanel .quickFundPeriod>p:first-child{color:#bfd7ff;font-weight:700}
 #quickFundPanel .quickFundMetric{display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 6px}
 #quickFundPanel .quickFundMetric b{font-variant-numeric:tabular-nums}
+#quickFundPanel .quickFundResult{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:3px 0 8px}
 #quickFundPanel .quickFundGood{color:#42d6bb;font-weight:700}
 #quickFundPanel .quickFundBad{color:#ff737a;font-weight:700}
 #quickFundPanel .quickFundUnknown{color:#a8b3c5}
 #quickFundPanel .quickFundCompare{padding:1px 5px;border-radius:4px;background:#263247;font-variant-numeric:tabular-nums}
 #quickFundPanel .quickFundCompare.quickFundGood{background:#143b38}
 #quickFundPanel .quickFundCompare.quickFundBad{background:#46272f}
+#quickFundPanel .quickFundCompare.quickFundUnknown{background:#2b3443}
 #quickFundPanel .quickFundMuted{color:#a8b3c5;font-size:11px}
 #quickFundPanel button{min-height:32px;padding:4px 9px;border:1px solid #394356;border-radius:6px;background:#253046;color:var(--text)}
 #quickFundClose{position:absolute;top:7px;right:7px;min-width:34px}
@@ -570,7 +570,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v67 (ファンダ概要を色分け)';
+const APP_VERSION='v68 (予想比はファンダ内に集約)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -2187,21 +2187,9 @@ function showEarnings(ticker, message){
   const date=feedDate || (upcoming && Date.now()-upcoming.at<86400000 && upcoming.dates.find(d=>d>=today));
   const chip=$('earningsChip');
   const label=date ? '次回決算 '+date.slice(5).replace('-','/') : message || '決算予定: 未確認';
-  const summary=earningsChipSummary(ticker);
   const first=document.createElement('span'); first.textContent=label;
   chip.replaceChildren(first);
-  if(summary){
-    if(summary.eps){
-      const second=document.createElement('span'); second.className='earningsEps'; second.textContent=summary.eps;
-      chip.appendChild(second);
-    }
-    if(summary.sales){
-      const third=document.createElement('span'); third.className='earningsSales'; third.textContent=summary.sales;
-      chip.appendChild(third);
-    }
-  }
-  chip.title=[date ? ticker+' 決算予定 '+date+'（変更の可能性あり・'+(feedDate?'Finnhub':'Alpha Vantage')+'）' : label,
-    summary?.title].filter(Boolean).join(' ｜ ');
+  chip.title=date ? ticker+' 決算予定 '+date+'（変更の可能性あり・'+(feedDate?'Finnhub':'Alpha Vantage')+'）' : label;
   redrawOverlay(); layoutOverlay();
   if($('fundBack').classList.contains('open')) renderFundPanel();
   if(!$('quickFundPanel').hidden) renderQuickFund();
@@ -2356,19 +2344,22 @@ function fundText(parent,tag,value,cls){
   if(cls) node.className=cls;
   parent.appendChild(node); return node;
 }
-function quickFundTrendClass(value){
-  const result=String(value).replace(/^(?:予想比|前年比)\s*/, '');
-  if(/^\+/.test(result)||/^(黒字転換|赤字解消|超過)$/.test(result)) return 'quickFundGood';
-  if(/^[-−]/.test(result)||/^(赤字継続|未達)$/.test(result)) return 'quickFundBad';
-  return 'quickFundUnknown';
+function quickFundSurprise(actual,estimate){
+  if(!Number.isFinite(estimate)) return {text:'予想データなし',cls:'quickFundUnknown'};
+  if(!Number.isFinite(actual)) return {text:'実績未取得',cls:'quickFundUnknown'};
+  const diff=actual-estimate;
+  const verdict=diff>0?'予想超え':diff<0?'予想未達':'予想どおり';
+  const percent=estimate===0?'':(' '+(diff>0?'+':'')+(diff/Math.abs(estimate)*100).toFixed(1)+'%');
+  return {text:verdict+percent,cls:diff>0?'quickFundGood':diff<0?'quickFundBad':'quickFundUnknown'};
 }
-function quickFundMetric(parent,label,value,comparisons='',negative=false){
+function quickFundMetric(parent,label,value,forecast,result,yoy='—',negative=false){
   const row=document.createElement('p');row.className='quickFundMetric';parent.appendChild(row);
   fundText(row,'span',label);
   fundText(row,'b',value,negative?'quickFundBad':value==='未取得'||value==='—'?'quickFundUnknown':'');
-  for(const part of comparisons.split('・').filter(x=>/^(予想比|前年比)/.test(x))){
-    fundText(row,'span',part,'quickFundCompare '+quickFundTrendClass(part));
-  }
+  fundText(row,'span','／ 予想 '+forecast,'quickFundMuted');
+  const status=document.createElement('p');status.className='quickFundResult';parent.appendChild(status);
+  fundText(status,'span',result.text,'quickFundCompare '+result.cls);
+  if(yoy!=='—') fundText(status,'span','前年比 '+yoy,'quickFundMuted');
 }
 function renderQuickFund(){
   const ticker=current.ticker, body=$('quickFundBody'); body.replaceChildren();
@@ -2384,25 +2375,25 @@ function renderQuickFund(){
     const upcoming=feedEvents(ticker).find(e=>e.forecast?.eps!=null||e.forecast?.revenue!=null);
     if(upcoming){
       fundText(body,'p','Finnhubの保存予想 '+upcoming.date,'quickFundMuted');
-      quickFundMetric(body,'EPS',fundNumber(upcoming.forecast.eps));
-      quickFundMetric(body,'売上',fundMoney(upcoming.forecast.revenue,'USD'));
+      fundText(body,'p','EPS '+fundNumber(upcoming.forecast.eps)+' ／ 売上 '+fundMoney(upcoming.forecast.revenue,'USD'));
     }
   }
-  const summary=earningsChipSummary(ticker);
   rows.slice(0,3).forEach((r,i)=>{
     const block=document.createElement('div');block.className='quickFundPeriod';body.appendChild(block);
-    fundText(block,'p',(i===0?'直近':'過去')+' '+r.period+'期（発表 '+r.date+'）');
+    fundText(block,'p',(i===0?'直近':i+'期前')+' '+r.period+'期（発表 '+r.date+'）');
+    const snapshot=store.get(fundSnapshotKey(ticker,r.period),null);
+    const before=Number.isFinite(snapshot?.at) && !!r.date && new Date(snapshot.at).toISOString().slice(0,10)<r.date;
+    const epsEstimate=before && Number.isFinite(snapshot.eps)?snapshot.eps:r.estimate;
     const epsYoY=fundYoY(rows,i,'eps');
-    quickFundMetric(block,'EPS',fundNumber(r.eps),i===0 && summary?.eps?summary.eps.replace(/^EPS /,'')
-      :epsYoY!=='—'?'前年比 '+epsYoY:'',r.eps<0);
+    quickFundMetric(block,'EPS',fundNumber(r.eps),fundNumber(epsEstimate),quickFundSurprise(r.eps,epsEstimate),epsYoY,r.eps<0);
     const revIndex=revenues.findIndex(x=>x.period===r.period),rev=revenues[revIndex];
     const yoy=rev?fundYoY(revenues,revIndex,'revenue'):'—';
+    const salesEstimate=before && rev?.currency==='USD' && Number.isFinite(snapshot.revenue)?snapshot.revenue*1e9:null;
     quickFundMetric(block,'売上',rev?fundMoney(rev.revenue,rev.currency):'未取得',
-      i===0 && summary?.sales?summary.sales.replace(/^売上 /,''):
-        yoy!=='—'?'前年比 '+yoy:'');
+      fundMoney(salesEstimate,salesEstimate==null?'':'USD'),quickFundSurprise(rev?.revenue,salesEstimate),yoy);
   });
   if(history) fundText(body,'p','実績：Alpha Vantage（取得 '+new Date(history.at).toLocaleDateString('ja-JP')+
-    '）。売上の予想比は発表前の保存値がある場合のみ。','quickFundMuted');
+    '）。EPS予想は発表前の保存値を優先し、なければ履歴の予想。売上予想は発表前の保存値がある場合のみ。','quickFundMuted');
   fundText(body,'p','利益率・現金・負債・企業ガイダンス・割安度はこの画面では未取得。AIによる分析ではありません。','quickFundMuted');
 }
 function fundInput(form,label,name,value=''){
