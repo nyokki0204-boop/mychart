@@ -574,7 +574,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v69 (前期比と加速・減速)';
+const APP_VERSION='v70 (時間足ごとの直線トレンドライン)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -4052,19 +4052,11 @@ function layoutOneGeometry(d){
     setPos(parts.txt,{x:x+6,y:y+14});
     parts.txt.textContent=statsText(d.a, d.b);   // +3.2% / 値幅 / 本数
   } else if(d.type==='trend'){
-    // Timeframe changes alter the number and spacing of bars. Interpolate the
-    // price by the saved timestamps so the line has the same value on each chart.
-    const lo=Math.min(d.a.t,d.b.t), hi=Math.max(d.a.t,d.b.t);
-    const times=[lo,...epochs.filter(t=>t>lo&&t<hi),hi];
-    const points=times.map(t=>{
-      const fraction=(t-d.a.t)/(d.b.t-d.a.t);
-      const price=logScale && d.a.p>0 && d.b.p>0
-        ? Math.exp(Math.log(d.a.p)+(Math.log(d.b.p)-Math.log(d.a.p))*fraction)
-        : d.a.p+(d.b.p-d.a.p)*fraction;
-      return {x:tsToX(t),y:Py(price)};
-    });
-    if(points.some(p=>p.x==null||p.y==null||!isFinite(p.x)||!isFinite(p.y))){showParts(parts,false);return;}
-    const pts=points.map(p=>p.x+','+p.y).join(' ');
+    // Keep saved time/price anchors, but join their projected screen positions.
+    // Calendar-time interpolation bends at weekends/holidays on compressed
+    // trading-day axes. Two points stay straight in every timeframe and scale.
+    // Intermediate prices can differ between timeframes; anchors are unchanged.
+    const pts=x1+','+y1+' '+x2+','+y2;
     setPos(parts.hit,{points:pts});
     setPos(parts.vis,{points:pts,'stroke-width':d.width||2,'stroke-dasharray':dashOf(d.style)});
   } else {
