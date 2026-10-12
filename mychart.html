@@ -533,6 +533,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
       <div class="mbtns" id="indListBtns">
         <button id="indClose">閉じる</button>
         <button id="indNew">＋新規作成</button>
+        <button id="indPocketPivot">＋PP（日足）</button>
       </div>
       <div id="indEditor" style="display:none;">
         <input id="indName" placeholder="インジ名（例: RSI14）" autocomplete="off" />
@@ -3080,6 +3081,28 @@ plot(ta.ema(close, len), { color: col, width: 2, pane: 'main' });
 // plot(ta.rsi(close, input('RSI期間', 14)), { color:'#e91e63', pane:'sub' });
 `;
 
+const POCKET_PIVOT_CODE = `// 前日終値比の上昇・50日SMAより上・下落日の最大出来高超え
+const days = toggle('15営業日で比較（OFFは10営業日）', false) ? 15 : 10;
+if (timeframe === '1d') {
+  const ma50 = ta.sma(close, 50);
+  const valid = v => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  const hits = close.map((price, i) => {
+    if (i < Math.max(49, days + 1) || ma50[i] == null ||
+        !valid(price) || !valid(close[i-1]) || !valid(volume[i]) ||
+        price <= close[i-1] || price <= ma50[i]) return false;
+    let maxDownVolume = null;
+    for (let j = i-days; j < i; j++) {
+      if (!valid(close[j]) || !valid(close[j-1]) || !valid(volume[j])) return false;
+      if (close[j] < close[j-1]) {
+        maxDownVolume = Math.max(maxDownVolume || 0, volume[j]);
+      }
+    }
+    return maxDownVolume != null && volume[i] > maxDownVolume;
+  });
+  signal(hits, {shape:'up', color:'#29b6f6', text:'PP'+days});
+}
+`;
+
 /* 1つのインジのコードを実行して、「引きたい線」と「出したい矢印」を集める */
 function runIndicatorCode(ind){
   const plots=[], signals=[], inputs=[], tables=[], bgs=[];
@@ -3150,8 +3173,8 @@ function runIndicatorCode(ind){
     return (p[name]!==undefined) ? !!p[name] : d;
   };
   // 書いたコードを関数に変換して実行（open/close/ta/plot などを渡す）
-  const fn=new Function('open','high','low','close','volume','ta','plot','signal','input','hbars','hline','htf','sym','table','bg','toggle','fade', ind.code);
-  fn(openA, highA, lowA, closeA, volA, ta, plot, signal, input, hbars, hline, htf, sym, table, bg, toggle, fade);
+  const fn=new Function('open','high','low','close','volume','ta','plot','signal','input','hbars','hline','htf','sym','table','bg','toggle','fade','timeframe', ind.code);
+  fn(openA, highA, lowA, closeA, volA, ta, plot, signal, input, hbars, hline, htf, sym, table, bg, toggle, fade, current.step);
   return {plots, signals, inputs, tables, bgs};
 }
 
@@ -3479,6 +3502,11 @@ function openIndSettings(ind){
   finally{ collectingInputs=false; }
   $('indParamTitle').textContent = ind.name + ' の設定';
   const box=$('indParamFields'); box.innerHTML='';
+  if(ind.id==='pocket-pivot'){
+    box.innerHTML='<div style="color:var(--muted);font-size:12px;line-height:1.6;margin-bottom:10px;">'
+      +'日足専用。終値が前日終値・50日SMAより上で、当日出来高が直前10／15営業日の下落日の最大出来高を超える日に表示します。'
+      +'比較期間に当日は含めません。下落日がない場合やデータ不足時は検知しません。最新足は確定まで判定が変わります。</div>';
+  }
   if(!inputs.length){
     box.innerHTML='<div style="color:var(--muted); font-size:13px; padding:6px 0;">'
       +'設定できる項目がありません。コードの中で input(\'名前\', 初期値) を使うと、ここに欄が出ます。</div>';
@@ -3583,6 +3611,14 @@ function openIndEditor(ind){
 $('indBtn').addEventListener('click', openIndMgr);
 $('indClose').addEventListener('click', ()=>$('indBack').classList.remove('open'));
 $('indNew').addEventListener('click', ()=>openIndEditor(null));
+$('indPocketPivot').addEventListener('click', ()=>{
+  let ind=indicators.find(x=>x.id==='pocket-pivot');
+  if(!ind){
+    ind={id:'pocket-pivot', name:'ポケットピボット（日足）', code:POCKET_PIVOT_CODE, on:true};
+    indicators.push(ind);
+  }else ind.on=true;
+  saveInds(); applyIndicators(); openIndSettings(ind);
+});
 $('indCancel').addEventListener('click', ()=>{
   $('indEditor').style.display='none';
   renderIndList(); $('indList').style.display='block'; $('indListBtns').style.display='flex';
