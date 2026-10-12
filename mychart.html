@@ -533,7 +533,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
       <div class="mbtns" id="indListBtns">
         <button id="indClose">閉じる</button>
         <button id="indNew">＋新規作成</button>
-        <button id="indPocketPivot">＋PP（日足）</button>
+        <button id="indPocketPivot">＋PP</button>
       </div>
       <div id="indEditor" style="display:none;">
         <input id="indName" placeholder="インジ名（例: RSI14）" autocomplete="off" />
@@ -3081,9 +3081,9 @@ plot(ta.ema(close, len), { color: col, width: 2, pane: 'main' });
 // plot(ta.rsi(close, input('RSI期間', 14)), { color:'#e91e63', pane:'sub' });
 `;
 
-const POCKET_PIVOT_CODE = `// 前日終値比の上昇・50日SMAより上・下落日の最大出来高超え
-const days = toggle('15営業日で比較（OFFは10営業日）', false) ? 15 : 10;
-if (timeframe === '1d') {
+const POCKET_PIVOT_CODE = `// 前足終値比の上昇・50本SMAより上・下落足の最大出来高超え
+const days = toggle('15本で比較（OFFは10本）', false) ? 15 : 10;
+if (['1d', '1w', '1M'].includes(timeframe)) {
   const ma50 = ta.sma(close, 50);
   const valid = v => typeof v === 'number' && Number.isFinite(v) && v > 0;
   const hits = close.map((price, i) => {
@@ -3099,9 +3099,26 @@ if (timeframe === '1d') {
     }
     return maxDownVolume != null && volume[i] > maxDownVolume;
   });
-  signal(hits, {shape:'up', color:'#29b6f6', text:'PP'+days});
+  signal(hits, {shape:'up', color:'#29b6f6', text:'PP'+days+(timeframe==='1w'?'週':timeframe==='1M'?'月':'')});
 }
 `;
+
+function upgradePocketPivot(ind){
+  const oldCode=POCKET_PIVOT_CODE
+    .replace('前足終値比の上昇・50本SMAより上・下落足の最大出来高超え', '前日終値比の上昇・50日SMAより上・下落日の最大出来高超え')
+    .replace('15本で比較（OFFは10本）', '15営業日で比較（OFFは10営業日）')
+    .replace("if (['1d', '1w', '1M'].includes(timeframe))", "if (timeframe === '1d')")
+    .replace("text:'PP'+days+(timeframe==='1w'?'週':timeframe==='1M'?'月':'')", "text:'PP'+days");
+  if(ind.id!=='pocket-pivot' || ind.code!==oldCode) return false;
+  ind.code=POCKET_PIVOT_CODE;
+  if(ind.name==='ポケットピボット（日足）') ind.name='ポケットピボット';
+  if(ind.params && ind.params['15営業日で比較（OFFは10営業日）']!==undefined){
+    ind.params['15本で比較（OFFは10本）']=ind.params['15営業日で比較（OFFは10営業日）'];
+    delete ind.params['15営業日で比較（OFFは10営業日）'];
+  }
+  return true;
+}
+if(indicators.map(upgradePocketPivot).some(Boolean)) store.set('custom-inds', indicators);
 
 /* 1つのインジのコードを実行して、「引きたい線」と「出したい矢印」を集める */
 function runIndicatorCode(ind){
@@ -3504,8 +3521,8 @@ function openIndSettings(ind){
   const box=$('indParamFields'); box.innerHTML='';
   if(ind.id==='pocket-pivot'){
     box.innerHTML='<div style="color:var(--muted);font-size:12px;line-height:1.6;margin-bottom:10px;">'
-      +'日足専用。終値が前日終値・50日SMAより上で、当日出来高が直前10／15営業日の下落日の最大出来高を超える日に表示します。'
-      +'比較期間に当日は含めません。下落日がない場合やデータ不足時は検知しません。最新足は確定まで判定が変わります。</div>';
+      +'日足・週足・月足に対応。終値が前足終値・50本SMAより上で、出来高が直前10／15本の下落足の最大出来高を超える足に表示します。'
+      +'週足は10／15週・50週SMA、月足は10／15か月・50か月SMAです。比較期間に当足は含めません。下落足がない場合やデータ不足時は検知しません。最新足は確定まで判定が変わります。</div>';
   }
   if(!inputs.length){
     box.innerHTML='<div style="color:var(--muted); font-size:13px; padding:6px 0;">'
@@ -3614,7 +3631,7 @@ $('indNew').addEventListener('click', ()=>openIndEditor(null));
 $('indPocketPivot').addEventListener('click', ()=>{
   let ind=indicators.find(x=>x.id==='pocket-pivot');
   if(!ind){
-    ind={id:'pocket-pivot', name:'ポケットピボット（日足）', code:POCKET_PIVOT_CODE, on:true};
+    ind={id:'pocket-pivot', name:'ポケットピボット', code:POCKET_PIVOT_CODE, on:true};
     indicators.push(ind);
   }else ind.on=true;
   saveInds(); applyIndicators(); openIndSettings(ind);
