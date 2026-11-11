@@ -289,11 +289,12 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
   padding:5px 8px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);
   color:var(--text);font-size:11px;font-weight:600;text-align:left;cursor:pointer}
 #earningsChip span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#quickFundBtn{display:flex;flex:0 0 auto;align-items:center;justify-content:center;min-width:54px;min-height:34px;
+#quickFundBtn,#chartWatchBtn{display:flex;flex:0 0 auto;align-items:center;justify-content:center;min-width:54px;min-height:34px;
   padding:5px 7px;border:1px solid #4b6080;border-radius:7px;background:rgba(22,27,36,.94);
   color:#d7e6ff;font-size:11px;font-weight:700;cursor:pointer}
-#quickFundBtn[hidden]{display:none}
-#quickFundBtn:focus-visible{outline:2px solid #81afff}
+#quickFundBtn[hidden],#chartWatchBtn[hidden]{display:none}
+#quickFundBtn:focus-visible,#chartWatchBtn:focus-visible{outline:2px solid #81afff}
+#chartWatchBtn:disabled{color:#69d5b1;border-color:#36876c;cursor:default}
 #quickFundPanel{position:absolute;right:7px;bottom:114px;z-index:12;width:min(320px,calc(100% - 14px));
   max-height:min(55dvh,390px);overflow-y:auto;touch-action:pan-y;
   padding:11px;background:#19212ef8;border:1px solid #4b6080;border-radius:9px;box-shadow:0 12px 30px #000a;
@@ -413,6 +414,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
         </section>
       </div>
       <div id="fundQuickActions">
+        <button id="chartWatchBtn" type="button" title="表示中の銘柄を監視リストに追加">＋監視</button>
         <button id="quickFundBtn" type="button" aria-expanded="false" aria-controls="quickFundPanel" title="銘柄の業績をチャート上で確認">ファンダ</button>
         <button id="earningsChip" type="button" title="決算と業績を確認">決算予定: 未確認</button>
       </div>
@@ -575,7 +577,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v70 (時間足ごとの直線トレンドライン)';
+const APP_VERSION='v71 (チャートから監視へ追加)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -836,9 +838,11 @@ function watchAutoTicker(t,source){
   if(!target.tickers.includes(t)) target.tickers.push(t);
   if(store.set('mychart-lists',updated)){
     lists=updated;
-    const L={source}, reviewed=reviewedFor(L);
-    reviewed[t]=true;
-    store.set(reviewKey(L),reviewed);
+    if(source){
+      const L={source}, reviewed=reviewedFor(L);
+      reviewed[t]=true;
+      store.set(reviewKey(L),reviewed);
+    }
     refreshRussellView(); setFoot(t+' を手動の「監視」に保存しました');
   }
 }
@@ -2660,6 +2664,7 @@ async function render(){
   const ticker=current.ticker, step=current.step;
   exprMode = looksLikeExpr(ticker);      // 桁数の切り替えに使う
   $('hdrTicker').textContent=ticker;
+  updateChartWatchButton();
   $('quickFundBtn').hidden=exprMode || !/^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker);
   $('hdrFav').style.display=isFav(ticker)?'inline':'none';
   store.set('mychart-last', ticker);
@@ -4711,6 +4716,7 @@ function renderTabs(){
    最初の40件だけ即座に出し、残りは少しずつ足す（画面が固まらない） */
 let listRenderToken=0;
 function renderList(){
+  updateChartWatchButton();
   const list=$('list'); list.innerHTML='';
   const my=++listRenderToken;
   const tickers=activeList().tickers;
@@ -4908,6 +4914,20 @@ function openFundDetail(){
   renderFundPanel(); refreshEarnings(current.ticker);
   loadRevenue(current.ticker); loadStockRs(current.ticker);
 }
+function updateChartWatchButton(){
+  const button=$('chartWatchBtn'), ticker=current.ticker;
+  const valid=!looksLikeExpr(ticker) && /^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker);
+  const saved=lists.some(L=>!isAutoList(L) && L.name==='監視' && L.tickers.includes(ticker));
+  button.hidden=!valid;
+  button.disabled=!valid || saved;
+  button.textContent=saved?'✓監視中':'＋監視';
+  button.title=saved?ticker+' は監視リストに登録済み':ticker+' を監視リストに追加';
+}
+$('chartWatchBtn').addEventListener('click',()=>{
+  updateChartWatchButton();
+  if(!$('chartWatchBtn').disabled) watchAutoTicker(current.ticker);
+  updateChartWatchButton();
+});
 $('quickFundBtn').addEventListener('click',()=>{
   if(!$('quickFundPanel').hidden){closeQuickFund();return;}
   $('quickFundPanel').hidden=false;
@@ -5418,3 +5438,4 @@ whenReady(main);
 </script>
 </body>
 </html>
+
