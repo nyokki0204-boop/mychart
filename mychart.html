@@ -266,7 +266,6 @@
 header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-btn{font-size:17px}#penBtn,#refreshBtn,#maxBtn,#layoutBtn,.gear{min-width:32px;min-height:36px;margin-left:1px;padding:6px;border:0;background:transparent}header svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
 .tf button{min-height:36px;font-size:13px}.legend{font-size:12px;line-height:1.5}#indChips{top:52px;max-width:66%}#indTable{top:52px;max-width:32%;font-size:11px}#indTable td{max-width:100px;overflow:hidden;text-overflow:ellipsis}
 #selectionActions{position:absolute;bottom:34px;left:8px;z-index:9;display:flex;gap:5px;padding:4px;background:#19212eed;border:1px solid #394356;border-radius:8px}#selectionActions[hidden]{display:none}#selectionActions button{min-height:36px;padding:6px 10px;color:#d1d4dc;background:transparent;border:0;font-size:12px}#selectionActions button:last-child{color:#ef5350}
-#latestBtn{position:absolute;right:70px;bottom:30px;z-index:8;border:1px solid #394356;border-radius:7px;background:#19212ee6;color:#d1d4dc;padding:7px 9px;font-size:12px;min-height:34px}
 /* Sector context floats over the chart; it never creates another layout row. */
 #sectorContext{position:absolute;top:6px;right:7px;z-index:8;max-width:calc(100% - 14px)}
 #sectorChip{display:block;margin-left:auto;max-width:min(190px,56vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -584,7 +583,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v75 (監視削除後の銘柄送りを修正)';
+const APP_VERSION='v76 (最新へボタンを削除)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -5433,7 +5432,6 @@ function syncAxisLabels(){
  const count=document.createElement('span');count.id='polyCount';count.setAttribute('aria-live','polite');polyBar.appendChild(count);
  [['polyDone','完了',()=>{if(pendingPoly&&pendingPoly.length>=2){setTool(null);setFoot('折線を保存しました。タップして点を修正できます');}}],['polyBack','1点戻す',backPoly],['polyCancel','取消',cancelPoly]].forEach(([id,label,fn])=>{const b=document.createElement('button');b.id=id;b.textContent=label;b.onclick=fn;polyBar.appendChild(b);});$('chartWrap').appendChild(polyBar);syncPolyActions();
  $('chart').addEventListener('pointerdown',()=>{if(!tool&&!drag){selected=null;hideDelBtn();layoutOverlay();}});
- const latest=document.createElement('button');latest.id='latestBtn';latest.textContent='最新へ ›';latest.onclick=()=>{const n=currentCandles.length,show=initialBars($('chart'));if(n)chart.timeScale().setVisibleLogicalRange({from:Math.max(0,n-show),to:n+3});};$('chartWrap').appendChild(latest);
  const panel=$('barMorePanel');
  [['出来高の高さ','volume',6,30],['サブインジの高さ','sub',6,18]].forEach(([name,key,min,max])=>{const row=document.createElement('label');row.textContent=name;const r=document.createElement('input');r.type='range';r.min=min;r.max=max;r.value=Math.round((panePrefs[key]||.12)*100);r.setAttribute('aria-label',name);const out=document.createElement('output');out.textContent=r.value+'%';r.oninput=()=>{panePrefs[key]=r.value/100;panePrefs.compact=false;out.textContent=r.value+'%';layoutPanes();layoutOverlay();};r.onchange=()=>store.set('mychart-pane-view',panePrefs);row.append(r,out);panel.appendChild(row);});
  const compact=document.createElement('button');const label=()=>compact.textContent=panePrefs.compact?'ペインを通常表示':'価格チャートを広く';label();compact.onclick=()=>{panePrefs.compact=!panePrefs.compact;store.set('mychart-pane-view',panePrefs);label();layoutPanes();layoutOverlay();};panel.appendChild(compact);
@@ -5539,6 +5537,7 @@ if(cfg&&token)push();
 
 </body>
 </html>
+
 
 
 
