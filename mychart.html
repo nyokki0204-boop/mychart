@@ -298,6 +298,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
 #quickFundBtn[hidden],#chartWatchBtn[hidden]{display:none}
 #quickFundBtn:focus-visible,#chartWatchBtn:focus-visible{outline:2px solid #81afff}
 #chartWatchBtn:disabled{color:#69d5b1;border-color:#36876c;cursor:default}
+#chartWatchBtn[data-saved="true"]{color:#ffb4b4;border-color:#a65b64}
 #quickFundPanel{position:absolute;right:7px;bottom:114px;z-index:12;width:min(320px,calc(100% - 14px));
   max-height:min(55dvh,390px);overflow-y:auto;touch-action:pan-y;
   padding:11px;background:#19212ef8;border:1px solid #4b6080;border-radius:9px;box-shadow:0 12px 30px #000a;
@@ -583,7 +584,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v73 (監視ボタンをチャート右上へ)';
+const APP_VERSION='v74 (チャートから監視を解除)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -4926,13 +4927,25 @@ function updateChartWatchButton(){
   const valid=!looksLikeExpr(ticker) && /^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker);
   const saved=lists.some(L=>!isAutoList(L) && L.name==='監視' && L.tickers.includes(ticker));
   button.hidden=!valid;
-  button.disabled=!valid || saved;
-  button.textContent=saved?'✓監視中':'＋監視';
-  button.title=saved?ticker+' は監視リストに登録済み':ticker+' を監視リストに追加';
+  button.disabled=!valid;
+  button.dataset.saved=String(saved);
+  button.textContent=saved?'監視から削除':'＋監視';
+  button.title=saved?ticker+' を監視リストから削除':ticker+' を監視リストに追加';
 }
 $('chartWatchBtn').addEventListener('click',()=>{
   updateChartWatchButton();
-  if(!$('chartWatchBtn').disabled) watchAutoTicker(current.ticker);
+  if($('chartWatchBtn').disabled) return;
+  if($('chartWatchBtn').dataset.saved==='true'){
+    const ticker=current.ticker;
+    const updated=lists.map(L=>!isAutoList(L) && L.name==='監視'
+      ? {...L,tickers:L.tickers.filter(t=>t!==ticker)} : L);
+    if(store.set('mychart-lists',updated)){
+      lists=updated;
+      window.dispatchEvent(new Event('watchlist-changed'));
+      refreshRussellView();
+      setFoot(ticker+' を監視リストから削除しました');
+    }else setFoot('保存できませんでした。監視登録は変更していません');
+  }else watchAutoTicker(current.ticker);
   updateChartWatchButton();
 });
 $('quickFundBtn').addEventListener('click',()=>{
@@ -5519,6 +5532,7 @@ if(cfg&&token)push();
 
 </body>
 </html>
+
 
 
 
