@@ -584,7 +584,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v74 (チャートから監視を解除)';
+const APP_VERSION='v75 (監視削除後の銘柄送りを修正)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -4922,6 +4922,7 @@ function openFundDetail(){
   renderFundPanel(); refreshEarnings(current.ticker);
   loadRevenue(current.ticker); loadStockRs(current.ticker);
 }
+let removedWatchPosition=null;
 function updateChartWatchButton(){
   const button=$('chartWatchBtn'), ticker=current.ticker;
   const valid=!looksLikeExpr(ticker) && /^[A-Z0-9][A-Z0-9.\-^]{0,14}$/.test(ticker);
@@ -4937,9 +4938,13 @@ $('chartWatchBtn').addEventListener('click',()=>{
   if($('chartWatchBtn').disabled) return;
   if($('chartWatchBtn').dataset.saved==='true'){
     const ticker=current.ticker;
+    const selectedList=activeList(), removedIndex=selectedList.tickers.indexOf(ticker);
     const updated=lists.map(L=>!isAutoList(L) && L.name==='監視'
       ? {...L,tickers:L.tickers.filter(t=>t!==ticker)} : L);
     if(store.set('mychart-lists',updated)){
+      if(!isAutoList(selectedList) && selectedList.name==='監視' && removedIndex>=0){
+        removedWatchPosition={ticker,listId:selectedList.id,index:removedIndex};
+      }
       lists=updated;
       window.dispatchEvent(new Event('watchlist-changed'));
       refreshRussellView();
@@ -5175,9 +5180,11 @@ function stepSymbol(dir, target){
   const cur=(target===2) ? c2.ticker : current.ticker;
   let i=list.indexOf(cur);
   // リストに無い銘柄からのスワイプは端から始める
-  i = (i<0) ? (dir>0 ? 0 : list.length-1) : (i+dir+list.length)%list.length;
+  if(i<0 && target!==2 && removedWatchPosition?.ticker===cur && removedWatchPosition.listId===activeList().id){
+    i=(removedWatchPosition.index+(dir>0?0:-1)+list.length)%list.length;
+  }else i = (i<0) ? (dir>0 ? 0 : list.length-1) : (i+dir+list.length)%list.length;
   if(target===2){ c2.ticker=list[i]; render2(); }
-  else { current.ticker=list[i]; render(); }
+  else { removedWatchPosition=null; current.ticker=list[i]; render(); }
   setFoot(list[i]+'（'+(i+1)+'/'+list.length+'・'+activeList().name+(target===2?'・2画面目':'')+'）');
 }
 function swipeTarget(el, target){
@@ -5532,6 +5539,7 @@ if(cfg&&token)push();
 
 </body>
 </html>
+
 
 
 
