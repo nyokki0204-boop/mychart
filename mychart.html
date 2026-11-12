@@ -285,6 +285,9 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
   background:#233044;color:var(--text);border:1px solid #394356;border-radius:6px;font-size:12px}
 #sectorPanel .sector-actions button:first-child{background:var(--accent);border-color:var(--accent);color:#fff}
 #fundQuickActions{position:absolute;right:7px;bottom:72px;z-index:8;display:flex;align-items:flex-end;gap:6px;max-width:calc(100% - 14px)}
+#chartWatchActions{position:absolute;top:42px;right:70px;z-index:8;display:flex;align-items:center;gap:4px}
+#chartWatchActions button{min-height:44px;touch-action:manipulation;white-space:nowrap}
+#chartWatchActions .watch-sync{padding:5px 7px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);color:var(--muted);font-size:11px;cursor:pointer}
 #earningsChip{position:relative;min-width:0;max-width:220px;min-height:30px;
   padding:5px 8px;border:1px solid #394356;border-radius:7px;background:rgba(22,27,36,.94);
   color:var(--text);font-size:11px;font-weight:600;text-align:left;cursor:pointer}
@@ -413,9 +416,11 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
           <div class="sector-actions"><button id="sectorSave" type="button">指定を保存</button><button id="sectorReset" type="button">自動判定に戻す</button></div>
         </section>
       </div>
-      <div id="fundQuickActions">
-        <button type="button" onclick="document.getElementById('watchSyncDialog').showModal()">監視同期</button>
+      <div id="chartWatchActions">
         <button id="chartWatchBtn" type="button" title="表示中の銘柄を監視リストに追加">＋監視</button>
+        <button class="watch-sync" type="button" title="監視リストの同期設定" onclick="document.getElementById('watchSyncDialog').showModal()">同期</button>
+      </div>
+      <div id="fundQuickActions">
         <button id="quickFundBtn" type="button" aria-expanded="false" aria-controls="quickFundPanel" title="銘柄の業績をチャート上で確認">ファンダ</button>
         <button id="earningsChip" type="button" title="決算と業績を確認">決算予定: 未確認</button>
       </div>
@@ -578,7 +583,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v72 (監視リストの非公開同期)';
+const APP_VERSION='v73 (監視ボタンをチャート右上へ)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -5514,5 +5519,6 @@ if(cfg&&token)push();
 
 </body>
 </html>
+
 
 
