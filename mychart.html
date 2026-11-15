@@ -418,7 +418,7 @@ header{gap:2px;padding:4px 8px}.navsym{width:34px;min-height:36px;border:0}.sym-
       </div>
       <div id="chartWatchActions">
         <button id="chartWatchBtn" type="button" title="表示中の銘柄を監視リストに追加">＋監視</button>
-        <button class="watch-sync" type="button" title="監視リストの同期設定" onclick="document.getElementById('watchSyncDialog').showModal()">同期</button>
+        <button id="watchSyncButton" class="watch-sync" type="button" title="監視リストの同期設定" onclick="document.getElementById('watchSyncDialog').showModal()">同期設定</button>
       </div>
       <div id="fundQuickActions">
         <button id="quickFundBtn" type="button" aria-expanded="false" aria-controls="quickFundPanel" title="銘柄の業績をチャート上で確認">ファンダ</button>
@@ -583,7 +583,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v76 (最新へボタンを削除)';
+const APP_VERSION='v77 (監視の追加・削除と自動同期)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -5465,13 +5465,13 @@ whenReady(main);
 <dialog id="watchSyncDialog" style="background:#161b24;color:#d1d4dc;border:1px solid #787b86;border-radius:10px;max-width:420px;width:90%">
 <form method="dialog"><button style="float:right">閉じる</button></form>
 <h3>監視リストの自動同期</h3>
-<p>「監視」リストの追加・削除を非公開のGitHubへ保存します。端末内の記録は残ります。</p>
+<p>初回接続後は「＋監視」で自動同期し、「監視から削除」でその銘柄だけ同期先から外します。普段はこの画面を開く必要はありません。</p>
 <p>初回：専用のPrivateリポジトリを作成し、そのリポジトリだけに Contents: Read and write を許可したFine-grained tokenを発行してください。</p>
 <p><a href="https://github.com/new" target="_blank" rel="noopener">保存先を作成</a> · <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">トークンを発行</a></p>
 <label>保存先（ユーザー名/リポジトリ名）<input id="wsRepo" placeholder="nyokki0204-boop/mychart-watchlist" style="width:100%"></label>
 <label>専用トークン<input id="wsToken" type="password" autocomplete="off" style="width:100%"></label>
 <p><label><input id="wsRemember" type="checkbox">この端末にトークンを保存する</label><br><small>保存すると再起動後も同期します。同じサイトのスクリプトから参照できるため、専用リポジトリだけの権限に限定してください。トークンをチャットには送らないでください。</small></p>
-<button id="wsConnect" type="button">接続して同期</button> <button id="wsRetry" type="button">再試行</button> <button id="wsOff" type="button">接続解除</button>
+<button id="wsConnect" type="button">接続して同期</button> <button id="wsRetry" type="button">再試行</button> <button id="wsOff" type="button">自動同期をオフ</button>
 <p id="wsStatus" role="status">未接続。毎朝の通知設定は別途必要です。</p>
 </dialog>
 <script>
@@ -5479,7 +5479,13 @@ whenReady(main);
 const key='mychart-watch-sync', el=id=>document.getElementById(id);
 let cfg=store.get(key,null), token=cfg?.token||'', busy=false, pending=false, stopped=false;
 const snapshot=()=>JSON.stringify([...new Set(lists.filter(L=>!isAutoList(L)&&L.name==='監視').flatMap(L=>L.tickers))].sort());
-const status=t=>{el('wsStatus').textContent=t;};
+let observed=snapshot();
+const status=(t,label='同期設定')=>{
+ el('wsStatus').textContent=t;
+ const button=el('watchSyncButton');
+ button.textContent=label;
+ button.title=t;
+};
 const persist=()=>store.set(key,{repo:cfg.repo,sha:cfg.sha,last:cfg.last,token:el('wsRemember').checked?token:''});
 if(cfg){el('wsRepo').value=cfg.repo;el('wsRemember').checked=!!token;status(token?'接続済み・確認待ち':'トークンを入力して再接続してください');}
 async function api(path,options={}){
@@ -5500,15 +5506,15 @@ async function push(){
    stopped=true;throw Error('保存先が別の端末で更新されています。自動上書きを停止しました。「接続して同期」で確認してください');
   }
   if(current!==cfg.last || !remote){
-   status('同期中…この画面を閉じずにお待ちください');
+   status('監視の変更を反映中…','同期中');
    const data={schema_version:1,list_name:'監視',tickers:JSON.parse(current),updated_at:new Date().toISOString()};
    const bytes=new TextEncoder().encode(JSON.stringify(data,null,2));
    const content=btoa(Array.from(bytes,b=>String.fromCharCode(b)).join(''));
    const result=await api('/contents/watchlist.json',{method:'PUT',body:JSON.stringify({message:'Sync MyChart watchlist',content,...(remote?{sha:remote.sha}:{})})});
    cfg.sha=result.content.sha;cfg.last=current;persist();
   }
-  status('同期済み '+new Date().toLocaleString()+' ／ '+JSON.parse(current).length+'銘柄。毎朝の通知は別途設定が必要です。');
- }catch(e){status('未同期：'+e.message+'。端末の記録は保持しています');}
+  status('同期済み '+new Date().toLocaleString()+' ／ '+JSON.parse(current).length+'銘柄。毎朝の通知は別途設定が必要です。','同期済');
+ }catch(e){status('未同期：'+e.message+'。端末の記録は保持しています','未同期');}
  finally{busy=false;if(pending&&!stopped)setTimeout(push,0);}
 }
 el('wsConnect').onclick=async()=>{
@@ -5528,7 +5534,15 @@ el('wsConnect').onclick=async()=>{
 };
 el('wsRetry').onclick=push;
 el('wsOff').onclick=()=>{if(busy){status('同期完了後に解除してください');return;}cfg=null;token='';store.set(key,null);el('wsToken').value='';status('接続解除済み。端末と保存先の銘柄は残っています');};
-window.addEventListener('watchlist-changed',()=>{status('端末に保存済み・未同期');push();});
+window.addEventListener('watchlist-changed',()=>{
+ const current=snapshot();
+ if(current===observed)return;
+ observed=current;
+ if(!cfg||!token){status('端末に保存済み。自動同期には初回接続が必要です','未接続');return;}
+ if(stopped){status('競合のため未同期です。同期設定を確認してください','未同期');return;}
+ status('監視の変更を反映中…','同期中');
+ push();
+});
 window.addEventListener('online',push);
 window.addEventListener('beforeunload',e=>{if(busy||pending){e.preventDefault();e.returnValue='';}});
 if(cfg&&token)push();
