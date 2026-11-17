@@ -593,7 +593,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v79 (ポケットピボット)';
+const APP_VERSION='v80 (ポケットピボット)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -1035,7 +1035,7 @@ async function syncIbd(){
     });
     if(!store.set('mychart-lists',nextLists)) throw new Error('端末への保存に失敗');
     lists=nextLists;
-    if(!lists.some(L=>L.id===activeListId)){
+    if(activeListId!==pocketPivotList.id && !lists.some(L=>L.id===activeListId)){
       activeListId='ibd:all'; store.set('mychart-active-list',activeListId);
     }
     if(previous!==scanDate) reentry.forEach(t=>delete ibdReviewed[t]);
