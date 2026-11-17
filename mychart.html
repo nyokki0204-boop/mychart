@@ -593,7 +593,7 @@ let diskMem=null;
 let storeWarned=false;
 /* このファイルの版数。差し替えたのに古い画面が出ている、という混乱を防ぐため、
    起動時に下のバーへ表示する。数字が変わっていなければ差し替えできていない */
-const APP_VERSION='v80 (ポケットピボット)';
+const APP_VERSION='v81 (ポケットピボット)';
 
 const store = {
   get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch(e){ return fb; } },
@@ -800,7 +800,7 @@ function pocketPivotRows(sessions, watched, now=Date.now()){
   return [...rows.values()];
 }
 function validatePocketPivots(data){
-  if(data?.schema_version!==1 || !Array.isArray(data.sessions) || data.sessions.length>3) throw Error('検知結果の形式が不正です');
+  if(data?.schema_version!==1 || !Array.isArray(data.sessions) || data.sessions.length>5) throw Error('検知結果の形式が不正です');
   const dates=new Set();
   for(const session of data.sessions){
     if(!/^\d{4}-\d{2}-\d{2}$/.test(session?.date) || dates.has(session.date)
